@@ -126,7 +126,7 @@ def extract_job_details(text, api_key):
         # Initialize LLM
         llm = ChatGroq(
             groq_api_key=api_key,
-            model_name="mixtral-8x7b-32768",
+            model_name="llama3-70b-8192",
             temperature=0.5,
             max_tokens=1000
         )
@@ -235,7 +235,7 @@ def generate_cold_email(job_details, portfolio_items, api_key):
         # Initialize LLM
         llm = ChatGroq(
             groq_api_key=api_key,
-            model_name="mixtral-8x7b-32768",
+            model_name="llama3-70b-8192",
             temperature=0.7,
             max_tokens=1000
         )
