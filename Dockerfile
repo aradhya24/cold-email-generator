@@ -16,7 +16,11 @@ COPY requirements.txt .
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 # Install without using hashes to avoid hash verification errors
-RUN pip install --no-cache-dir --no-deps -r requirements.txt || pip install --no-cache-dir --no-deps --no-hash-checking -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir blinker>=1.6.2 && \
+    pip install --no-cache-dir -r requirements.txt || \
+    pip install --no-cache-dir --no-deps -r requirements.txt && \
+    pip install --no-cache-dir streamlit>=1.35.0 blinker>=1.6.2
 
 # Runtime stage
 FROM python:3.12-slim AS runtime
