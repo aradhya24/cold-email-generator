@@ -1,10 +1,15 @@
+"""Main application module."""
+
 import streamlit as st
 from langchain_community.document_loaders import WebBaseLoader
 
-from chains import Chain
-from portfolio import Portfolio
-from utils import clean_text
+from chains import Chain, EmailChain
+from portfolio import Portfolio, PortfolioProcessor
+from utils import clean_text, format_experience, validate_input
 
+# Initialize session state
+if 'email_chain' not in st.session_state:
+    st.session_state.email_chain = EmailChain(st.secrets["GROQ_API_KEY"])
 
 def create_streamlit_app(llm, portfolio, clean_text):
     st.title("📧 Cold Mail Generator")
@@ -25,6 +30,45 @@ def create_streamlit_app(llm, portfolio, clean_text):
         except Exception as e:
             st.error(f"An Error Occurred: {e}")
 
+# Streamlit UI
+st.title("Cold Email Generator")
+
+# Input fields
+recipient_name = st.text_input("Recipient Name")
+recipient_position = st.text_input("Recipient Position")
+recipient_company = st.text_input("Recipient Company")
+recipient_experience = st.text_area("Recipient Experience")
+
+sender_name = st.text_input("Your Name")
+sender_position = st.text_input("Your Position")
+sender_company = st.text_input("Your Company")
+
+purpose = st.text_area("Purpose of Email")
+
+if st.button("Generate Email"):
+    if all([recipient_name, recipient_position, sender_name, purpose]):
+        recipient_info = f"""
+        Name: {recipient_name}
+        Position: {recipient_position}
+        Company: {recipient_company}
+        Experience: {recipient_experience}
+        """
+
+        sender_info = f"""
+        Name: {sender_name}
+        Position: {sender_position}
+        Company: {sender_company}
+        """
+
+        with st.spinner("Generating email..."):
+            email = st.session_state.email_chain.generate_email(
+                recipient_info=recipient_info,
+                sender_info=sender_info,
+                purpose=purpose
+            )
+            st.text_area("Generated Email", email, height=300)
+    else:
+        st.error("Please fill in all required fields")
 
 if __name__ == "__main__":
     chain = Chain()

@@ -18,12 +18,41 @@ def clean_text(text):
     return text
 
 def format_experience(experience_list):
-    """Format the experience list into a readable string."""
+    """Format the experience list into a readable string.
+
+    Args:
+        experience_list: List of experience dictionaries
+
+    Returns:
+        Formatted string of experiences
+    """
     return '\n'.join(
         f"- {exp.get('role')} at {exp.get('company')} ({exp.get('duration')})"
         for exp in experience_list
     )
 
 def validate_input(text):
-    """Validate user input for safety and formatting."""
+    """Validate user input for safety and formatting.
+
+    Args:
+        text: Input text to validate
+
+    Returns:
+        Cleaned and validated text
+    """
     return text.strip() if text else ""
+
+def process_portfolio_data(data):
+    """Process portfolio data into a standardized format.
+
+    Args:
+        data: Raw portfolio data
+
+    Returns:
+        Processed portfolio data
+    """
+    return {
+        'name': data.get('name', ''),
+        'position': data.get('position', ''),
+        'experience': data.get('experience', [])
+    }

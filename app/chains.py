@@ -1,3 +1,5 @@
+"""Chain definitions for the application."""
+
 import os
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
@@ -5,6 +7,8 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.exceptions import OutputParserException
 from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader
+from typing import List, Dict, Any
+from langchain.chains import LLMChain
 
 load_dotenv()
 
@@ -14,6 +18,71 @@ WebBaseLoader.requests_kwargs = {
         'User-Agent': os.getenv('USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
     }
 }
+
+class EmailChain:
+    """Chain for generating cold emails."""
+
+    def __init__(self, groq_api_key: str):
+        """Initialize the email chain.
+
+        Args:
+            groq_api_key: The GROQ API key for authentication
+        """
+        self.llm = ChatGroq(
+            groq_api_key=groq_api_key,
+            model_name="mixtral-8x7b-32768",
+            temperature=0.7,
+            max_tokens=32768
+        )
+
+        self.prompt = PromptTemplate(
+            input_variables=["recipient_info", "sender_info", "purpose"],
+            template="""
+            Generate a professional cold email based on the following information:
+
+            Recipient Information:
+            {recipient_info}
+
+            Sender Information:
+            {sender_info}
+
+            Purpose:
+            {purpose}
+
+            Please write a compelling cold email that:
+            1. Is personalized and relevant to the recipient
+            2. Clearly states the purpose
+            3. Includes a clear call to action
+            4. Is concise and professional
+            5. Has a friendly but professional tone
+
+            Email:
+            """
+        )
+
+        self.chain = LLMChain(llm=self.llm, prompt=self.prompt)
+
+    def generate_email(
+        self,
+        recipient_info: str,
+        sender_info: str,
+        purpose: str
+    ) -> str:
+        """Generate a cold email.
+
+        Args:
+            recipient_info: Information about the recipient
+            sender_info: Information about the sender
+            purpose: The purpose of the email
+
+        Returns:
+            The generated email text
+        """
+        return self.chain.run(
+            recipient_info=recipient_info,
+            sender_info=sender_info,
+            purpose=purpose
+        )
 
 class Chain:
     def __init__(self):

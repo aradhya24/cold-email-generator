@@ -27,3 +27,31 @@ def process_portfolio_data(data):
         'position': data.get('position', ''),
         'experience': data.get('experience', [])
     }
+
+"""Portfolio data processing module."""
+
+
+class PortfolioProcessor:
+    """Process and manage portfolio data."""
+
+    def __init__(self, collection):
+        """Initialize the portfolio processor.
+
+        Args:
+            collection: ChromaDB collection for storing portfolio data
+        """
+        self.collection = collection
+
+    def query_links(self, skills):
+        """Query portfolio links based on skills.
+
+        Args:
+            skills: List of skills to search for
+
+        Returns:
+            List of matching portfolio links
+        """
+        return self.collection.query(
+            query_texts=skills,
+            n_results=2
+        ).get('metadatas', [])

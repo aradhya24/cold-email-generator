@@ -1,21 +1,42 @@
-from dotenv import load_dotenv
+"""Example usage of the email generator."""
+
 import os
+from dotenv import load_dotenv
+from chains import EmailChain
 
-# Load environment variables from .env file
-load_dotenv()
 
-# Get the user agent from environment variables
-user_agent = os.getenv('USER_AGENT')
+def main():
+    """Run example email generation."""
+    load_dotenv()
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    
+    if not groq_api_key:
+        raise ValueError("GROQ_API_KEY not found in environment variables")
+    
+    chain = EmailChain(groq_api_key)
+    
+    recipient_info = """
+    Name: John Doe
+    Position: Software Engineer at Tech Corp
+    Experience: 5 years in Python development
+    """
+    
+    sender_info = """
+    Name: Jane Smith
+    Position: Technical Recruiter
+    Company: AI Solutions Inc
+    """
+    
+    purpose = "Recruiting for a Senior Python Developer position"
+    
+    email = chain.generate_email(
+        recipient_info=recipient_info,
+        sender_info=sender_info,
+        purpose=purpose
+    )
+    
+    print(email)
 
-# Example usage
-print(f"Using User Agent: {user_agent}")
 
-# You can use this user agent in your requests
-import requests
-
-headers = {
-    'User-Agent': user_agent
-}
-
-# Example request
-# response = requests.get('https://example.com', headers=headers) 
+if __name__ == "__main__":
+    main() 
