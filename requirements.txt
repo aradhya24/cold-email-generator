@@ -12,3 +12,4 @@ numpy>=1.24.0
 pycparser>=2.21
 selenium>=4.15.0
 blinker>=1.6.2
+beautifulsoup4>=4.12.2
