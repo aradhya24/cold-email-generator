@@ -13,9 +13,15 @@ services:
       - .env
     volumes:
       - ./vectorstore:/app/vectorstore
+      - ./app/resource:/app/app/resource
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
       interval: 30s
       timeout: 10s
-      retries: 3 
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3" 

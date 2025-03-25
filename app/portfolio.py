@@ -19,3 +19,11 @@ class Portfolio:
 
     def query_links(self, skills):
         return self.collection.query(query_texts=skills, n_results=2).get('metadatas', [])
+
+def process_portfolio_data(data):
+    # Split the long line into multiple lines
+    return {
+        'name': data.get('name', ''),
+        'position': data.get('position', ''),
+        'experience': data.get('experience', [])
+    }

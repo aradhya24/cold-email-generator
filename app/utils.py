@@ -1,3 +1,5 @@
+"""Utility functions for the application."""
+
 import re
 
 def clean_text(text):
@@ -14,3 +16,14 @@ def clean_text(text):
     # Remove extra whitespace
     text = ' '.join(text.split())
     return text
+
+def format_experience(experience_list):
+    """Format the experience list into a readable string."""
+    return '\n'.join(
+        f"- {exp.get('role')} at {exp.get('company')} ({exp.get('duration')})"
+        for exp in experience_list
+    )
+
+def validate_input(text):
+    """Validate user input for safety and formatting."""
+    return text.strip() if text else ""
