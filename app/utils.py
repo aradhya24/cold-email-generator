@@ -1,5 +1,6 @@
 """Utility functions for text processing and validation."""
 import re
+import traceback
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 
@@ -7,10 +8,23 @@ from bs4 import BeautifulSoup
 def clean_text(text: str) -> str:
     """Clean and normalize text content."""
     try:
-        # Remove HTML tags
-        soup = BeautifulSoup(text, 'html.parser')
-        text = soup.get_text()
+        print(f"Original text length: {len(text)}")
         
+        # Handle empty text
+        if not text or len(text.strip()) == 0:
+            print("Warning: Empty text received")
+            return ""
+            
+        # Remove HTML tags
+        try:
+            soup = BeautifulSoup(text, 'html.parser')
+            text = soup.get_text(separator=' ')
+            print(f"Text after HTML parsing: {len(text)} characters")
+        except Exception as e:
+            print(f"Error in BeautifulSoup parsing: {e}")
+            # Fallback to regex if BeautifulSoup fails
+            text = re.sub(r'<[^>]*?>', ' ', text)
+            
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text)
         
@@ -20,10 +34,13 @@ def clean_text(text: str) -> str:
         # Normalize whitespace
         text = ' '.join(text.split())
         
+        print(f"Cleaned text length: {len(text)}")
         return text.strip()
     except Exception as e:
         print(f"Error cleaning text: {e}")
-        return text  # Return original text if cleaning fails
+        print(traceback.format_exc())
+        # Return a truncated version of the original text if cleaning fails
+        return text[:10000] if text else ""
 
 
 def format_experience(experience: str) -> str:
@@ -54,17 +71,17 @@ def validate_input(data: Dict[str, Any]) -> List[str]:
     
     return errors
 
+
 def process_portfolio_data(data):
-    """Process portfolio data into a standardized format.
-
-    Args:
-        data: Raw portfolio data
-
-    Returns:
-        Processed portfolio data
-    """
-    return {
-        'name': data.get('name', ''),
-        'position': data.get('position', ''),
-        'experience': data.get('experience', [])
-    }
+    """Process the portfolio data into a more usable format."""
+    skills = set()
+    for skill in data['skills'].split(','):
+        skills.add(skill.strip().lower())
+    
+    for project in data['projects'].split(','):
+        project_skills = project.split(':')
+        if len(project_skills) > 1:
+            for skill in project_skills[1].split('&'):
+                skills.add(skill.strip().lower())
+    
+    return list(skills)

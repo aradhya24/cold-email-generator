@@ -2,6 +2,8 @@
 
 import os
 import streamlit as st
+import time
+import traceback
 from langchain_community.document_loaders import WebBaseLoader
 
 from chains import Chain, EmailChain
@@ -36,7 +38,7 @@ Simply paste a job posting URL below and click Submit to generate a tailored ema
 
 url_input = st.text_input(
     "Enter a URL:",
-    value="https://www.naukri.com/job-listings-analyst-merkle-science-mumbai"
+    value="https://jobs.lever.co/merkle-science/a0fc5b0b-90ff-40b1-9d5e-8ab828383c34"
 )
 submit_button = st.button("Submit")
 
@@ -46,23 +48,59 @@ if submit_button:
     else:
         try:
             with st.spinner("Loading job posting..."):
-                loader = WebBaseLoader([url_input])
-                data = clean_text(loader.load().pop().page_content)
+                # Set a timeout for the loader to prevent hanging
+                st.write(f"Fetching content from: {url_input}")
+                
+                # Configure WebLoader with improved settings
+                loader = WebBaseLoader(
+                    web_paths=[url_input],
+                    requests_kwargs={
+                        'timeout': 30,  # 30 second timeout
+                        'headers': {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.5',
+                        }
+                    }
+                )
+                
+                # Load the content with progress updates
+                start_time = time.time()
+                st.write("Sending request...")
+                documents = loader.load()
+                st.write(f"Content received in {time.time() - start_time:.2f} seconds")
+                
+                # Process the content
+                st.write("Processing content...")
+                if not documents or len(documents) == 0:
+                    st.error("No content could be loaded from the URL. Please try a different URL.")
+                    st.stop()
+                
+                # Clean the text
+                data = clean_text(documents[0].page_content)
                 st.success("Job posting loaded successfully!")
                 
+                # Display a sample of the loaded content for debugging
+                st.expander("Preview of loaded content").write(data[:500] + "...")
+                
                 with st.spinner("Extracting job details..."):
+                    st.write("Initializing AI model...")
                     chain = Chain()
                     portfolio = Portfolio()
                     portfolio.load_portfolio()
                     
+                    st.write("Extracting job information...")
                     jobs = chain.extract_jobs(data)
                     if not jobs:
                         st.error("No job details could be extracted from the URL. Please check the URL and try again.")
                     else:
                         for job in jobs:
                             with st.spinner("Generating email..."):
+                                st.write("Finding relevant portfolio links...")
                                 skills = job.get('skills', [])
                                 links = portfolio.query_links(skills)
+                                
+                                st.write("Generating personalized email...")
                                 email = chain.write_mail(job, links)
                                 
                                 # Display job details
@@ -78,6 +116,7 @@ if submit_button:
                                         on_click=lambda: st.write("Email copied to clipboard!"))
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
+            st.error(traceback.format_exc())
             st.error("Please check the URL and try again. If the problem persists, contact support.")
 
 if __name__ == "__main__":
