@@ -57,11 +57,9 @@ test:
 build:
   stage: build
   before_script:
-    # Debug info
     - echo "Docker registry: $CI_REGISTRY"
     - echo "Docker image tag: $DOCKER_IMAGE"
     - echo "GitLab project: $CI_PROJECT_PATH"
-    # Use CI predefined variables for authentication
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     # Build the image
