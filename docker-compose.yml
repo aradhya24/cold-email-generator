@@ -2,13 +2,14 @@ version: '3.8'
 
 services:
   app:
-    image: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}
+    image: ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA:-latest}
     container_name: cold-email-generator
     ports:
       - "8501:8501"
     environment:
       - PYTHONUNBUFFERED=1
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
     env_file:
       - .env
     volumes:

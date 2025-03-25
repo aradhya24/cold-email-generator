@@ -11,7 +11,8 @@ variables:
   AWS_SSH_KEY: ${AWS_SSH_KEY}
   AWS_USER: ${AWS_USER}
   DOCKER_REGISTRY: ${CI_REGISTRY}
-  DOCKER_IMAGE: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}
+  # Use explicit repository path
+  DOCKER_IMAGE: ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA}
 
 stages:
   - test
@@ -55,10 +56,21 @@ test:
 # Build Docker image
 build:
   stage: build
+  before_script:
+    # Debug info
+    - echo "Docker registry: $CI_REGISTRY"
+    - echo "Docker image tag: $DOCKER_IMAGE"
+    - echo "GitLab project: $CI_PROJECT_PATH"
+    # Use CI predefined variables for authentication
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker build -t $DOCKER_IMAGE .
-    - docker push $DOCKER_IMAGE
+    # Build the image
+    - docker build --pull -t "$DOCKER_IMAGE" .
+    # Tag image with latest tag as well
+    - docker tag "$DOCKER_IMAGE" "${CI_REGISTRY}/aradhya24/cold-email-generator:latest"
+    # Push images
+    - docker push "$DOCKER_IMAGE"
+    - docker push "${CI_REGISTRY}/aradhya24/cold-email-generator:latest"
   only:
     - main
 
@@ -83,9 +95,17 @@ deploy:
         mkdir -p ~/app/app/resource
       "
     
+    # Set environment variables for docker-compose
+    - |
+      cat > .env.deploy << EOF
+      CI_REGISTRY=${CI_REGISTRY}
+      CI_COMMIT_SHA=${CI_COMMIT_SHA}
+      GROQ_API_KEY=${GROQ_API_KEY}
+      EOF
+    
     # Copy required files
     - scp docker-compose.yml ${AWS_USER}@${AWS_EC2_IP}:~/app/
-    - scp .env ${AWS_USER}@${AWS_EC2_IP}:~/app/ || true
+    - scp .env.deploy ${AWS_USER}@${AWS_EC2_IP}:~/app/.env
     - scp -r app/resource/* ${AWS_USER}@${AWS_EC2_IP}:~/app/app/resource/ || true
     
     # Setup Docker and required packages on EC2
@@ -119,7 +139,7 @@ deploy:
     - |
       ssh ${AWS_USER}@${AWS_EC2_IP} "
         cd ~/app && \
-        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY && \
+        echo '$CI_REGISTRY_PASSWORD' | docker login -u '$CI_REGISTRY_USER' --password-stdin '$CI_REGISTRY' && \
         docker-compose pull && \
         docker-compose up -d --force-recreate
         
