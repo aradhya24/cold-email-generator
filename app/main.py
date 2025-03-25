@@ -4,8 +4,6 @@ import os
 import streamlit as st
 import time
 import traceback
-import threading
-import signal
 from langchain_community.document_loaders import WebBaseLoader
 
 from chains import Chain, EmailChain
@@ -31,119 +29,131 @@ if 'email_chain' not in st.session_state:
     # Initialize the email chain
     st.session_state.email_chain = EmailChain(groq_api_key)
 
-# Timeout handler class
-class TimeoutError(Exception):
-    pass
-
-def timeout_handler(signum, frame):
-    raise TimeoutError("Operation timed out")
-
-# Function to load URL with timeout
+# Function to load URL content
 def load_url_content(url):
-    """Load content from URL without strict timeout."""
-    result = {"success": False, "data": None, "error": None}
-    
+    """Load content from a URL."""
     try:
         # Configure WebLoader with improved settings
         loader = WebBaseLoader(
             web_paths=[url],
             requests_kwargs={
                 'headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                                 'AppleWebKit/537.36 (KHTML, like Gecko) '
-                                 'Chrome/122.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.5',
                 }
             }
         )
         
-        # Load content directly
+        # Load the documents
         documents = loader.load()
-        if documents and len(documents) > 0:
-            result["data"] = documents[0].page_content
-            result["success"] = True
-        else:
-            result["error"] = "No content loaded"
+        if not documents:
+            return None
+        
+        # Return the page content of the first document
+        return documents[0].page_content
     except Exception as e:
-        result["error"] = str(e)
-    
-    return result
+        st.error(f"Error loading URL: {str(e)}")
+        return None
+
+# Function to generate cold emails from job postings
+def generate_cold_email(url):
+    """Generate a cold email from a job posting URL."""
+    try:
+        # Step 1: Load job posting content
+        with st.spinner("Loading job posting..."):
+            content = load_url_content(url)
+            if not content:
+                st.error("Failed to load content from the URL. Please check if the URL is accessible.")
+                return None
+            
+            # Clean the text content
+            data = clean_text(content)
+        
+        # Step 2: Extract job information
+        with st.spinner("Extracting job details..."):
+            chain = Chain()
+            portfolio = Portfolio()
+            portfolio.load_portfolio()
+            
+            jobs = chain.extract_jobs(data)
+            if not jobs:
+                st.error("Could not extract job details from this posting. Please try a different URL.")
+                return None
+        
+        # Step 3: Generate the cold email
+        with st.spinner("Generating cold email..."):
+            job = jobs[0]  # Use the first job
+            skills = job.get('skills', [])
+            links = portfolio.query_links(skills)
+            
+            email = chain.write_mail(job, links)
+        
+        return {
+            "job": job,
+            "email": email
+        }
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        st.error(traceback.format_exc())
+        return None
 
 # Streamlit UI
-st.title("📧 Cold Mail Generator")
+st.title("📧 Cold Email Generator | AtliQ")
 st.markdown("""
-This tool helps you generate personalized cold emails for job applications.
-Simply paste a job posting URL below and click Submit to generate a tailored email.
+This tool helps you generate personalized cold emails for job applications. 
+As a business development executive at AtliQ, you can create professional outreach emails 
+to potential clients based on their job postings.
+
+Simply paste a job posting URL below and click the button to generate a tailored email.
 """)
 
 with st.form(key="url_form"):
     url_input = st.text_input(
         "Enter a job posting URL:",
-        value="https://jobs.lever.co/merkle-science/a0fc5b0b-90ff-40b1-9d5e-8ab828383c34"
+        value="https://www.naukri.com/job-listings-analyst-merkle-science-mumbai-new-delhi-pune-bengaluru-1-to-2-years-210325501333"
     )
-    submit_button = st.form_submit_button("Generate Email")
+    submit_button = st.form_submit_button("Generate Cold Email")
 
 if submit_button:
     if not url_input:
         st.error("Please enter a valid URL")
     else:
-        try:
-            # Step 1: Load job posting
-            with st.spinner("Loading job posting..."):
-                st.write(f"Fetching content from: {url_input}")
-                
-                # Load URL content
-                start_time = time.time()
-                result = load_url_content(url_input)
-                
-                if not result["success"]:
-                    st.error(f"Failed to load content: {result['error']}")
-                    st.error("Please check if the URL is accessible and try again.")
-                    st.stop()
-                
-                data = clean_text(result["data"])
-                st.write(f"Content received and processed in {time.time() - start_time:.2f} seconds")
-                st.success("Job posting loaded successfully!")
+        # Generate the email
+        result = generate_cold_email(url_input)
+        
+        if result:
+            # Display job details
+            with st.expander("Job Details", expanded=False):
+                st.json(result["job"])
             
-            # Step 2: Extract job details
-            with st.spinner("Analyzing job posting..."):
-                chain = Chain()
-                portfolio = Portfolio()
-                portfolio.load_portfolio()
-                
-                jobs = chain.extract_jobs(data)
-                
-                if not jobs:
-                    st.error("Could not extract job details from this posting. Please try a different URL.")
-                    st.stop()
+            # Display the email
+            st.subheader("Your Cold Email")
+            st.markdown(result["email"])
             
-            # Step 3: Generate email
-            with st.spinner("Creating personalized email..."):
-                job = jobs[0]  # Use the first job
-                skills = job.get('skills', [])
-                links = portfolio.query_links(skills)
-                
-                email = chain.write_mail(job, links)
-            
-            # Step 4: Display results
-            st.subheader("Job Analysis")
-            st.json(job)
-            
-            st.subheader("Your Personalized Cold Email")
-            st.code(email, language='markdown')
-            
+            # Add download button
             st.download_button(
                 label="Download Email",
-                data=email,
+                data=result["email"],
                 file_name="cold_email.md",
                 mime="text/markdown"
             )
-            
-        except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
-            st.error("Please try a different job posting URL or contact support if the problem persists.")
 
+# Sidebar with company info
+with st.sidebar:
+    st.image("https://i.imgur.com/UWAUeHC.png", width=200)
+    st.title("AtliQ")
+    st.markdown("""
+    AtliQ is an AI & Software Consulting company dedicated to facilitating
+    the seamless integration of business processes through automated tools.
+    
+    We empower enterprises with tailored solutions, fostering:
+    - Scalability
+    - Process optimization
+    - Cost reduction
+    - Heightened overall efficiency
+    """)
+    
 if __name__ == "__main__":
     pass
 

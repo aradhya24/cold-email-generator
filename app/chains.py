@@ -2,7 +2,6 @@
 
 import os
 import time
-import signal
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -21,16 +20,8 @@ WebBaseLoader.requests_kwargs = {
                       'AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/122.0.0.0 Safari/537.36')
         )
-    },
-    'timeout': 30  # Add global timeout
+    }
 }
-
-# Timeout handler
-class TimeoutError(Exception):
-    pass
-
-def timeout_handler(signum, frame):
-    raise TimeoutError("Operation timed out")
 
 
 class EmailChain:
@@ -46,8 +37,7 @@ class EmailChain:
             groq_api_key=groq_api_key,
             model_name="mixtral-8x7b-32768",
             temperature=0.7,
-            max_tokens=4096,  # Reduced to prevent hanging
-            timeout=60  # 60 second timeout
+            max_tokens=8192
         )
 
         # Create the email prompt
@@ -94,10 +84,6 @@ class EmailChain:
             The generated email text
         """
         try:
-            # Set timeout
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(60)  # 60 second timeout
-            
             start_time = time.time()
             print("Starting email generation...")
             
@@ -107,9 +93,6 @@ class EmailChain:
                 "sender_info": sender_info,
                 "purpose": purpose
             })
-            
-            # Cancel timeout
-            signal.alarm(0)
             
             print(f"Email generation completed in {time.time() - start_time:.2f} seconds")
             
@@ -122,9 +105,6 @@ class EmailChain:
                 return "Error: Failed to generate a proper email. Please try again."
             
             return email_content
-        except TimeoutError:
-            print("Email generation timed out after 60 seconds")
-            return "Email generation timed out. Please try again with a simpler request."
         except Exception as e:
             print(f"Error generating email: {e}")
             return f"Error generating email: {str(e)}. Please try again."
@@ -139,9 +119,7 @@ class Chain:
             api_key=os.getenv("GROQ_API_KEY"),
             model_name="mixtral-8x7b-32768",
             temperature=0.7,
-            max_tokens=8192,  # Increased for better results
-            top_p=1,
-            verbose=True
+            max_tokens=8192
         )
         
         # Create the job extraction prompt with improved instructions
@@ -161,25 +139,31 @@ class Chain:
             ("human", "{text}")
         ])
         
-        # Create the email generation prompt with improved instructions
+        # Create the email generation prompt with improved instructions based on reference repo
         self.email_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a professional email writer specializing in cold job application emails.
+            ("system", """You are Mohan, a business development executive at AtliQ.
+            AtliQ is an AI & Software Consulting company dedicated to facilitating
+            the seamless integration of business processes through automated tools.
+            Over our experience, we have empowered numerous enterprises with
+            tailored solutions, fostering scalability, process optimization,
+            cost reduction, and heightened overall efficiency.
             
-            Write a personalized cold email based on the job details and portfolio links provided.
+            Write a professional cold email to the hiring manager regarding the job description provided.
             The email should:
-            1. Start with a compelling introduction referencing the specific job position and company
-            2. Highlight 2-3 relevant skills that match the job requirements
-            3. Briefly mention relevant experience and accomplishments
-            4. Express genuine interest in the role and company
-            5. Include a clear call to action
-            6. End with a professional closing
+            1. Introduce yourself professionally as Mohan from AtliQ
+            2. Reference the specific job posting by title and company
+            3. Explain how AtliQ can provide excellent candidates or services for this position
+            4. Highlight how AtliQ's expertise matches their requirements
+            5. Include the portfolio links provided to showcase AtliQ's relevant work
+            6. Include a clear call to action (like scheduling a meeting)
+            7. End with a professional closing
             
-            Keep the email concise (3-4 paragraphs) and conversational but professional.
-            Format the email as a markdown document with proper paragraphs and spacing."""),
-            ("human", """Job Details:
+            Keep the email concise (3-4 paragraphs) and focused on how AtliQ can help them fill their needs.
+            Format the email as a proper business email with appropriate greeting and signature."""),
+            ("human", """Job Description:
             {job_details}
             
-            Portfolio Links:
+            AtliQ Portfolio Links:
             {portfolio_links}""")
         ])
         
@@ -198,7 +182,6 @@ class Chain:
                 print(f"Truncating text from {len(text)} to 8000 characters")
                 text = text[:8000]
             
-            # Add a timeout to prevent hanging
             start_time = time.time()
             print("Starting job extraction...")
             
