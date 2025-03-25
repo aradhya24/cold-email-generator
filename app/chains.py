@@ -139,42 +139,43 @@ class Chain:
             api_key=os.getenv("GROQ_API_KEY"),
             model_name="mixtral-8x7b-32768",
             temperature=0.7,
-            max_tokens=4096,  # Reduced to prevent hanging
+            max_tokens=8192,  # Increased for better results
             top_p=1,
-            verbose=True,
-            timeout=60  # 60 second timeout
+            verbose=True
         )
         
-        # Create the job extraction prompt
+        # Create the job extraction prompt with improved instructions
         self.job_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a job information extractor. Extract key details from job postings.
-            Return the information in a structured JSON format with the following fields:
-            - title: Job title
-            - company: Company name
-            - location: Job location
-            - experience: Required experience
-            - skills: List of required skills
-            - description: Brief job description
+            ("system", """You are an expert job information extractor. Your task is to carefully extract key details from job postings.
             
-            If any field is not found, use null or an empty list.
-            Make sure to extract all relevant information from the job posting."""),
+            Return the information in a structured JSON format with these fields:
+            - title: The exact job title
+            - company: Company name
+            - location: Job location or remote status
+            - experience: Required years of experience
+            - skills: A comprehensive list of required skills and technologies
+            - description: A concise summary of the job description
+            
+            Be thorough and extract as many relevant skills as possible. If information is not found, use null or an empty list.
+            Ensure your response is valid JSON that can be parsed."""),
             ("human", "{text}")
         ])
         
-        # Create the email generation prompt
+        # Create the email generation prompt with improved instructions
         self.email_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert at writing cold emails for job applications.
-            Write a professional, personalized cold email based on the job details and portfolio links.
-            The email should:
-            1. Be concise and engaging (max 3-4 paragraphs)
-            2. Start with a strong opening that grabs attention
-            3. Highlight relevant skills and experience that match the job requirements
-            4. Show enthusiasm for the role and company
-            5. Include a clear call to action
-            6. Be professional but conversational in tone
-            7. End with a polite closing
+            ("system", """You are a professional email writer specializing in cold job application emails.
             
-            Format the email in markdown with proper paragraphs and line breaks."""),
+            Write a personalized cold email based on the job details and portfolio links provided.
+            The email should:
+            1. Start with a compelling introduction referencing the specific job position and company
+            2. Highlight 2-3 relevant skills that match the job requirements
+            3. Briefly mention relevant experience and accomplishments
+            4. Express genuine interest in the role and company
+            5. Include a clear call to action
+            6. End with a professional closing
+            
+            Keep the email concise (3-4 paragraphs) and conversational but professional.
+            Format the email as a markdown document with proper paragraphs and spacing."""),
             ("human", """Job Details:
             {job_details}
             
@@ -192,14 +193,10 @@ class Chain:
             # Print debugging info
             print(f"Text length for job extraction: {len(text)}")
             
-            # Limit text length if too long
-            if len(text) > 5000:  # Reduced further to prevent hanging
-                print(f"Truncating text from {len(text)} to 5000 characters")
-                text = text[:5000]
-            
-            # Set timeout
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(60)  # 60 second timeout
+            # Process a reasonable length of text
+            if len(text) > 8000:
+                print(f"Truncating text from {len(text)} to 8000 characters")
+                text = text[:8000]
             
             # Add a timeout to prevent hanging
             start_time = time.time()
@@ -207,9 +204,6 @@ class Chain:
             
             # Invoke the job chain
             result = self.job_chain.invoke({"text": text})
-            
-            # Cancel timeout
-            signal.alarm(0)
             
             # Log completion time
             print(f"Job extraction completed in {time.time() - start_time:.2f} seconds")
@@ -247,16 +241,6 @@ class Chain:
             
             print(f"Extracted {len(jobs)} job(s)")
             return jobs
-        except TimeoutError:
-            print("Job extraction timed out after 60 seconds")
-            return [{
-                'title': 'Job Information Extraction Timed Out',
-                'company': 'Unknown',
-                'location': 'Unknown',
-                'experience': 'Not specified',
-                'skills': ['Not available due to timeout'],
-                'description': 'The job extraction process timed out. Try again with a simpler job posting.'
-            }]
         except Exception as e:
             print(f"Error extracting jobs: {e}")
             # Create a minimal job record to allow the process to continue
@@ -285,10 +269,6 @@ class Chain:
             # Format portfolio links
             portfolio_links = "\n".join(links) if links else "No portfolio links available"
             
-            # Set timeout
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(60)  # 60 second timeout
-            
             start_time = time.time()
             print("Starting email generation...")
             
@@ -297,9 +277,6 @@ class Chain:
                 "job_details": job_details,
                 "portfolio_links": portfolio_links
             })
-            
-            # Cancel timeout
-            signal.alarm(0)
             
             print(f"Email generation completed in {time.time() - start_time:.2f} seconds")
             
@@ -312,9 +289,6 @@ class Chain:
                 return "Error: Failed to generate a proper email. Please try again."
             
             return email_content
-        except TimeoutError:
-            print("Email generation timed out after 60 seconds")
-            return "Email generation timed out. Please try again with a simpler request."
         except Exception as e:
             print(f"Error generating email: {e}")
             return "Error generating email. Please try again."

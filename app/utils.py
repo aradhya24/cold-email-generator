@@ -17,36 +17,46 @@ def clean_text(text: str) -> str:
             print("Warning: Empty text received")
             return ""
         
-        # Limit text size to prevent processing issues
+        # Process a reasonable amount of text
         if len(text) > 100000:
             print(f"Text too large ({len(text)} chars), truncating...")
             text = text[:100000]
             
-        # Remove HTML tags
+        # Remove HTML tags - use a more efficient approach
         try:
-            # Use a faster parser
-            soup = BeautifulSoup(text, 'html.parser')
+            # Use lxml parser for better performance
+            soup = BeautifulSoup(text, 'lxml')
+            
+            # Remove script and style elements
+            for script_or_style in soup(["script", "style"]):
+                script_or_style.decompose()
+                
+            # Get the text
             text = soup.get_text(separator=' ', strip=True)
             print(f"Text after HTML parsing: {len(text)} characters")
         except Exception as e:
             print(f"Error in BeautifulSoup parsing: {e}")
-            # Fallback to regex if BeautifulSoup fails
+            # Fallback to basic regex if BeautifulSoup fails
+            text = re.sub(r'<script.*?</script>', ' ', text, flags=re.DOTALL)
+            text = re.sub(r'<style.*?</style>', ' ', text, flags=re.DOTALL)
             text = re.sub(r'<[^>]*?>', ' ', text)
             
-        # Optimize text cleaning by combining operations
-        # Remove extra whitespace and normalize in one step
+        # Basic cleaning - combine into one step
         text = ' '.join(text.split())
         
-        # Remove special characters but keep basic punctuation - limit to essential operations
-        text = re.sub(r'[^\w\s.,!?-]', '', text)
+        # Only remove problematic characters, keep most punctuation
+        text = re.sub(r'[^\w\s.,!?:\-\'"]', ' ', text)
         
         print(f"Text cleaning completed in {time.time() - start_time:.2f} seconds. Final length: {len(text)}")
         return text.strip()
     except Exception as e:
         print(f"Error cleaning text: {e}")
         print(traceback.format_exc())
-        # Return a truncated version of the original text if cleaning fails
-        return text[:10000] if text else ""
+        # If all cleaning fails, just normalize whitespace
+        try:
+            return ' '.join(text.split())
+        except:
+            return text if text else ""
 
 
 def format_experience(experience: str) -> str:
