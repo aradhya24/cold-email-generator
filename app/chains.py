@@ -7,7 +7,6 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.exceptions import OutputParserException
 from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader
-from typing import List, Dict, Any
 from langchain.chains import LLMChain
 
 load_dotenv()
@@ -15,9 +14,15 @@ load_dotenv()
 # Configure WebBaseLoader with user agent
 WebBaseLoader.requests_kwargs = {
     'headers': {
-        'User-Agent': os.getenv('USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
+        'User-Agent': (
+            os.getenv('USER_AGENT', 
+                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                     'AppleWebKit/537.36 (KHTML, like Gecko) '
+                     'Chrome/122.0.0.0 Safari/537.36')
+        )
     }
 }
+
 
 class EmailChain:
     """Chain for generating cold emails."""
@@ -84,18 +89,35 @@ class EmailChain:
             purpose=purpose
         )
 
+
 class Chain:
+    """Chain for job extraction and email generation."""
+
     def __init__(self):
-        self.llm = ChatGroq(temperature=0, groq_api_key=os.getenv("GROQ_API_KEY"), model_name="llama-3.3-70b-versatile")
+        """Initialize the chain with GROQ LLM."""
+        self.llm = ChatGroq(
+            temperature=0,
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+            model_name="llama-3.3-70b-versatile"
+        )
 
     def extract_jobs(self, cleaned_text):
+        """Extract job information from cleaned text.
+
+        Args:
+            cleaned_text: Cleaned text from website
+
+        Returns:
+            List of extracted jobs
+        """
         prompt_extract = PromptTemplate.from_template(
             """
             ### SCRAPED TEXT FROM WEBSITE:
             {page_data}
             ### INSTRUCTION:
             The scraped text is from the career's page of a website.
-            Your job is to extract the job postings and return them in JSON format containing the following keys: `role`, `experience`, `skills` and `description`.
+            Your job is to extract the job postings and return them in JSON format 
+            containing the following keys: `role`, `experience`, `skills` and `description`.
             Only return the valid JSON.
             ### VALID JSON (NO PREAMBLE):
             """
@@ -110,28 +132,44 @@ class Chain:
         return res if isinstance(res, list) else [res]
 
     def write_mail(self, job, links):
+        """Generate email based on job and portfolio links.
+
+        Args:
+            job: Job description
+            links: Portfolio links
+
+        Returns:
+            Generated email text
+        """
         prompt_email = PromptTemplate.from_template(
             """
             ### JOB DESCRIPTION:
             {job_description}
 
             ### INSTRUCTION:
-            You are Mohan, a business development executive at AtliQ. AtliQ is an AI & Software Consulting company dedicated to facilitating
+            You are Mohan, a business development executive at AtliQ. 
+            AtliQ is an AI & Software Consulting company dedicated to facilitating
             the seamless integration of business processes through automated tools. 
-            Over our experience, we have empowered numerous enterprises with tailored solutions, fostering scalability, 
-            process optimization, cost reduction, and heightened overall efficiency. 
-            Your job is to write a cold email to the client regarding the job mentioned above describing the capability of AtliQ 
-            in fulfilling their needs.
-            Also add the most relevant ones from the following links to showcase Atliq's portfolio: {link_list}
+            Over our experience, we have empowered numerous enterprises with 
+            tailored solutions, fostering scalability, process optimization, 
+            cost reduction, and heightened overall efficiency. 
+            Your job is to write a cold email to the client regarding the job 
+            mentioned above describing the capability of AtliQ in fulfilling 
+            their needs.
+            Also add the most relevant ones from the following links to showcase 
+            Atliq's portfolio: {link_list}
             Remember you are Mohan, BDE at AtliQ. 
             Do not provide a preamble.
             ### EMAIL (NO PREAMBLE):
-
             """
         )
         chain_email = prompt_email | self.llm
-        res = chain_email.invoke({"job_description": str(job), "link_list": links})
+        res = chain_email.invoke({
+            "job_description": str(job),
+            "link_list": links
+        })
         return res.content
+
 
 if __name__ == "__main__":
     print(os.getenv("GROQ_API_KEY"))
