@@ -1,16 +1,13 @@
 """Chain definitions for the application."""
 
 import os
+from typing import List, Dict, Any
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.exceptions import OutputParserException
-from dotenv import load_dotenv
-from langchain_community.document_loaders import WebBaseLoader
 from langchain.chains import LLMChain
-from typing import List, Dict, Any
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableSequence
+from langchain_community.document_loaders import WebBaseLoader
 
 load_dotenv()
 
@@ -144,7 +141,7 @@ class Chain:
             {portfolio_links}""")
         ])
         
-        # Create the chains using the new RunnableSequence
+        # Create the chains
         self.job_chain = self.job_prompt | self.llm | JsonOutputParser()
         self.email_chain = self.email_prompt | self.llm
     
