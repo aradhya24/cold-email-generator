@@ -1,46 +1,58 @@
-"""Utility functions for the application."""
-
+"""Utility functions for text processing and validation."""
 import re
+from typing import List, Dict, Any
+from bs4 import BeautifulSoup
 
-def clean_text(text):
-    # Remove HTML tags
-    text = re.sub(r'<[^>]*?>', '', text)
-    # Remove URLs
-    text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-    # Remove special characters
-    text = re.sub(r'[^a-zA-Z0-9 ]', '', text)
-    # Replace multiple spaces with a single space
-    text = re.sub(r'\s{2,}', ' ', text)
-    # Trim leading and trailing whitespace
-    text = text.strip()
-    # Remove extra whitespace
-    text = ' '.join(text.split())
-    return text
 
-def format_experience(experience_list):
-    """Format the experience list into a readable string.
+def clean_text(text: str) -> str:
+    """Clean and normalize text content."""
+    try:
+        # Remove HTML tags
+        soup = BeautifulSoup(text, 'html.parser')
+        text = soup.get_text()
+        
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove special characters but keep basic punctuation
+        text = re.sub(r'[^\w\s.,!?-]', '', text)
+        
+        # Normalize whitespace
+        text = ' '.join(text.split())
+        
+        return text.strip()
+    except Exception as e:
+        print(f"Error cleaning text: {e}")
+        return text  # Return original text if cleaning fails
 
-    Args:
-        experience_list: List of experience dictionaries
 
-    Returns:
-        Formatted string of experiences
-    """
-    return '\n'.join(
-        f"- {exp.get('role')} at {exp.get('company')} ({exp.get('duration')})"
-        for exp in experience_list
-    )
+def format_experience(experience: str) -> str:
+    """Format experience string to a standard format."""
+    try:
+        # Remove any non-numeric characters except dots
+        years = re.sub(r'[^\d.]', '', experience)
+        
+        # Convert to float if possible
+        try:
+            years = float(years)
+            return f"{years:.1f} years"
+        except ValueError:
+            return experience
+    except Exception as e:
+        print(f"Error formatting experience: {e}")
+        return experience
 
-def validate_input(text):
-    """Validate user input for safety and formatting.
 
-    Args:
-        text: Input text to validate
-
-    Returns:
-        Cleaned and validated text
-    """
-    return text.strip() if text else ""
+def validate_input(data: Dict[str, Any]) -> List[str]:
+    """Validate input data and return list of errors."""
+    errors = []
+    
+    required_fields = ['title', 'company', 'location']
+    for field in required_fields:
+        if not data.get(field):
+            errors.append(f"{field.capitalize()} is required")
+    
+    return errors
 
 def process_portfolio_data(data):
     """Process portfolio data into a standardized format.

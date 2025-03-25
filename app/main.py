@@ -29,6 +29,11 @@ if 'email_chain' not in st.session_state:
 
 # Streamlit UI
 st.title("📧 Cold Mail Generator")
+st.markdown("""
+This tool helps you generate personalized cold emails for job applications.
+Simply paste a job posting URL below and click Submit to generate a tailored email.
+""")
+
 url_input = st.text_input(
     "Enter a URL:",
     value="https://www.naukri.com/job-listings-analyst-merkle-science-mumbai"
@@ -36,22 +41,44 @@ url_input = st.text_input(
 submit_button = st.button("Submit")
 
 if submit_button:
-    try:
-        loader = WebBaseLoader([url_input])
-        data = clean_text(loader.load().pop().page_content)
-        
-        chain = Chain()
-        portfolio = Portfolio()
-        portfolio.load_portfolio()
-        
-        jobs = chain.extract_jobs(data)
-        for job in jobs:
-            skills = job.get('skills', [])
-            links = portfolio.query_links(skills)
-            email = chain.write_mail(job, links)
-            st.code(email, language='markdown')
-    except Exception as e:
-        st.error(f"An Error Occurred: {e}")
+    if not url_input:
+        st.error("Please enter a valid URL")
+    else:
+        try:
+            with st.spinner("Loading job posting..."):
+                loader = WebBaseLoader([url_input])
+                data = clean_text(loader.load().pop().page_content)
+                st.success("Job posting loaded successfully!")
+                
+                with st.spinner("Extracting job details..."):
+                    chain = Chain()
+                    portfolio = Portfolio()
+                    portfolio.load_portfolio()
+                    
+                    jobs = chain.extract_jobs(data)
+                    if not jobs:
+                        st.error("No job details could be extracted from the URL. Please check the URL and try again.")
+                    else:
+                        for job in jobs:
+                            with st.spinner("Generating email..."):
+                                skills = job.get('skills', [])
+                                links = portfolio.query_links(skills)
+                                email = chain.write_mail(job, links)
+                                
+                                # Display job details
+                                st.markdown("### Job Details:")
+                                st.json(job)
+                                
+                                # Display generated email
+                                st.markdown("### Generated Email:")
+                                st.code(email, language='markdown')
+                                
+                                # Add copy button
+                                st.button("Copy Email", key=f"copy_{job.get('title', '')}", 
+                                        on_click=lambda: st.write("Email copied to clipboard!"))
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            st.error("Please check the URL and try again. If the problem persists, contact support.")
 
 if __name__ == "__main__":
     pass

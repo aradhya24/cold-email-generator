@@ -8,6 +8,9 @@ from langchain_core.exceptions import OutputParserException
 from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader
 from langchain.chains import LLMChain
+from typing import List, Dict, Any
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableSequence
 
 load_dotenv()
 
@@ -91,84 +94,119 @@ class EmailChain:
 
 
 class Chain:
-    """Chain for job extraction and email generation."""
-
+    """Chain for extracting job information and generating emails."""
+    
     def __init__(self):
-        """Initialize the chain with GROQ LLM."""
+        """Initialize the chain with Groq LLM."""
         self.llm = ChatGroq(
-            temperature=0,
-            groq_api_key=os.getenv("GROQ_API_KEY"),
-            model_name="llama-3.3-70b-versatile"
+            api_key=os.getenv("GROQ_API_KEY"),
+            model_name="mixtral-8x7b-32768",
+            temperature=0.7,
+            max_tokens=32768,
+            top_p=1,
+            verbose=True
         )
-
-    def extract_jobs(self, cleaned_text):
-        """Extract job information from cleaned text.
-
-        Args:
-            cleaned_text: Cleaned text from website
-
-        Returns:
-            List of extracted jobs
-        """
-        prompt_extract = PromptTemplate.from_template(
-            """
-            ### SCRAPED TEXT FROM WEBSITE:
-            {page_data}
-            ### INSTRUCTION:
-            The scraped text is from the career's page of a website.
-            Your job is to extract the job postings and return them in JSON format
-            containing the following keys: `role`, `experience`, `skills` and `description`.
-            Only return the valid JSON.
-            ### VALID JSON (NO PREAMBLE):
-            """
-        )
-        chain_extract = prompt_extract | self.llm
-        res = chain_extract.invoke(input={"page_data": cleaned_text})
+        
+        # Create the job extraction prompt
+        self.job_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a job information extractor. Extract key details from job postings.
+            Return the information in a structured JSON format with the following fields:
+            - title: Job title
+            - company: Company name
+            - location: Job location
+            - experience: Required experience
+            - skills: List of required skills
+            - description: Brief job description
+            
+            If any field is not found, use null or an empty list.
+            Make sure to extract all relevant information from the job posting."""),
+            ("human", "{text}")
+        ])
+        
+        # Create the email generation prompt
+        self.email_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an expert at writing cold emails for job applications.
+            Write a professional, personalized cold email based on the job details and portfolio links.
+            The email should:
+            1. Be concise and engaging (max 3-4 paragraphs)
+            2. Start with a strong opening that grabs attention
+            3. Highlight relevant skills and experience that match the job requirements
+            4. Show enthusiasm for the role and company
+            5. Include a clear call to action
+            6. Be professional but conversational in tone
+            7. End with a polite closing
+            
+            Format the email in markdown with proper paragraphs and line breaks."""),
+            ("human", """Job Details:
+            {job_details}
+            
+            Portfolio Links:
+            {portfolio_links}""")
+        ])
+        
+        # Create the chains using the new RunnableSequence
+        self.job_chain = self.job_prompt | self.llm | JsonOutputParser()
+        self.email_chain = self.email_prompt | self.llm
+    
+    def extract_jobs(self, text: str) -> List[Dict[str, Any]]:
+        """Extract job information from text."""
         try:
-            json_parser = JsonOutputParser()
-            res = json_parser.parse(res.content)
-        except OutputParserException:
-            raise OutputParserException("Context too big. Unable to parse jobs.")
-        return res if isinstance(res, list) else [res]
-
-    def write_mail(self, job, links):
-        """Generate email based on job and portfolio links.
-
-        Args:
-            job: Job description
-            links: Portfolio links
-
-        Returns:
-            Generated email text
-        """
-        prompt_email = PromptTemplate.from_template(
+            result = self.job_chain.invoke({"text": text})
+            if not result:
+                print("No job details extracted from text")
+                return []
+            
+            # Ensure result is a list
+            jobs = [result] if isinstance(result, dict) else result
+            
+            # Validate and clean job data
+            for job in jobs:
+                if not job.get('title'):
+                    print("Warning: Job title missing")
+                if not job.get('company'):
+                    print("Warning: Company name missing")
+                if not job.get('skills'):
+                    print("Warning: No skills extracted")
+            
+            return jobs
+        except Exception as e:
+            print(f"Error extracting jobs: {e}")
+            return []
+    
+    def write_mail(self, job: Dict[str, Any], links: List[str]) -> str:
+        """Generate a cold email based on job details and portfolio links."""
+        try:
+            # Format job details for the prompt
+            job_details = f"""
+            Title: {job.get('title', 'N/A')}
+            Company: {job.get('company', 'N/A')}
+            Location: {job.get('location', 'N/A')}
+            Experience: {job.get('experience', 'N/A')}
+            Skills Required: {', '.join(job.get('skills', []))}
+            Description: {job.get('description', 'N/A')}
             """
-            ### JOB DESCRIPTION:
-            {job_description}
-
-            ### INSTRUCTION:
-            You are Mohan, a business development executive at AtliQ.
-            AtliQ is an AI & Software Consulting company dedicated to facilitating
-            the seamless integration of business processes through automated tools.
-            Over our experience, we have empowered numerous enterprises with
-            tailored solutions, fostering scalability, process optimization,
-            cost reduction, and heightened overall efficiency.
-            Your job is to write a cold email to the client regarding the job
-            mentioned above describing the capability of AtliQ in fulfilling
-            their needs.
-            Also add the most relevant ones from the following links to showcase
-            Atliq's portfolio: {link_list}
-            Remember you are Mohan, BDE at AtliQ.
-            Do not provide a preamble.
-            ### EMAIL (NO PREAMBLE):
-            """
-        )
-        chain_email = prompt_email | self.llm
-        res = chain_email.invoke({
-            "job_description": str(job),
-            "link_list": links
-        })
-        return res.content
+            
+            # Format portfolio links
+            portfolio_links = "\n".join(links) if links else "No portfolio links available"
+            
+            # Generate email
+            result = self.email_chain.invoke({
+                "job_details": job_details,
+                "portfolio_links": portfolio_links
+            })
+            
+            # Extract content from result
+            email_content = result.content if hasattr(result, 'content') else str(result)
+            
+            # Validate email content
+            if not email_content or len(email_content.strip()) < 50:
+                print("Warning: Generated email is too short or empty")
+                return "Error: Failed to generate a proper email. Please try again."
+            
+            return email_content
+        except Exception as e:
+            print(f"Error generating email: {e}")
+            return "Error generating email. Please try again."
 
 
 if __name__ == "__main__":
