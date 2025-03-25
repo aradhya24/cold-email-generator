@@ -23,7 +23,7 @@ cache:
     - .cache/pip
     - venv/
 
-# ✅ Test Stage (Lint & Code Coverage)
+# Test Stage
 test:
   image: python:3.9-slim
   stage: test
@@ -32,11 +32,11 @@ test:
     - python3 -m venv venv
     - source venv/bin/activate
     - pip install -r requirements.txt pytest pytest-cov flake8
-    - mkdir -p tests && touch tests/__init__.py  # Ensure tests folder exists
+    - mkdir -p tests && touch tests/__init__.py
   script:
-    - flake8 app/ --config=setup.cfg  # Run code linting
-    - pytest --cov=app --cov-report=xml --cov-report=term-missing tests/  # Run tests & coverage
-    - ls -la  # Check if coverage.xml is generated
+    - flake8 app/ --config=setup.cfg
+    - pytest --cov=app --cov-report=xml --cov-report=term-missing tests/
+    - ls -la
   artifacts:
     when: always
     reports:
@@ -46,22 +46,19 @@ test:
     paths:
       - coverage.xml
 
-# ✅ Build Docker Image
+# Build Docker Image
 build:
   stage: build
-  script:
-    - echo "Docker registry: $CI_REGISTRY"
-    - echo "Docker image tag: $DOCKER_IMAGE"
-    - echo "GitLab project: $CI_PROJECT_PATH"
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker build --pull -t "$DOCKER_IMAGE" .
+  script: 
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build -t "$DOCKER_IMAGE" .
     - docker tag "$DOCKER_IMAGE" "${CI_REGISTRY}/aradhya24/cold-email-generator:latest"
     - docker push "$DOCKER_IMAGE"
     - docker push "${CI_REGISTRY}/aradhya24/cold-email-generator:latest"
   only:
     - main
 
-# ✅ Deploy to AWS EC2
+# Deploy to AWS EC2
 deploy:
   stage: deploy
   image: python:3.9-slim
@@ -77,36 +74,17 @@ deploy:
     - ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
   script:
-    # ✅ Ensure remote directories exist
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "mkdir -p ~/app/vectorstore && mkdir -p ~/app/app/resource"
-
-    # ✅ Create environment file for deployment
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "mkdir -p ~/app/vectorstore ~/app/app/resource"
     - echo "CI_REGISTRY=${CI_REGISTRY}" > .env.deploy
     - echo "CI_COMMIT_SHA=${CI_COMMIT_SHA}" >> .env.deploy
     - echo "GROQ_API_KEY=${GROQ_API_KEY}" >> .env.deploy
-
-    # ✅ Transfer required files to EC2 instance
     - scp docker-compose.yml ${AWS_USER}@${AWS_EC2_IP}:~/app/
     - scp .env.deploy ${AWS_USER}@${AWS_EC2_IP}:~/app/.env
     - scp -r app/resource/* ${AWS_USER}@${AWS_EC2_IP}:~/app/app/resource/ || true
-
-    # ✅ Install Docker if not present on the EC2 instance
     - ssh ${AWS_USER}@${AWS_EC2_IP} "if ! command -v docker &> /dev/null; then sudo apt-get update && sudo apt-get install -y docker.io docker-compose curl; fi"
-
-    # ✅ Ensure the user has permission to run Docker
     - ssh ${AWS_USER}@${AWS_EC2_IP} "if ! groups | grep -q docker; then sudo usermod -aG docker $USER; fi"
-
-    # ✅ Ensure Docker is running
     - ssh ${AWS_USER}@${AWS_EC2_IP} "if ! systemctl is-active --quiet docker; then sudo systemctl start docker; fi"
-
-    # ✅ Set correct permissions
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo chown -R $USER:$USER ~/app"
-
-    # ✅ Clean up old Docker images
     - ssh ${AWS_USER}@${AWS_EC2_IP} "docker system prune -f"
-
-    # ✅ Pull latest image & restart the application
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && echo '$CI_REGISTRY_PASSWORD' | docker login -u '$CI_REGISTRY_USER' --password-stdin '$CI_REGISTRY' && docker-compose pull && docker-compose up -d --force-recreate"
-
-    # ✅ Wait for the application to become ready
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && docker login -u '$CI_REGISTRY_USER' -p '$CI_REGISTRY_PASSWORD' '$CI_REGISTRY' && docker-compose pull && docker-compose up -d --force-recreate"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && echo 'Waiting for application to be ready...' && for i in {1..30}; do if curl -s http://localhost:8501/_stcore/health; then echo 'Application is ready!'; break; fi; echo 'Waiting for application to start...'; sleep 10; done"
