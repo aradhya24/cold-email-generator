@@ -31,7 +31,7 @@ if 'email_chain' not in st.session_state:
 st.title("📧 Cold Mail Generator")
 url_input = st.text_input(
     "Enter a URL:",
-    value="https://www.naukri.com/job-listings-analyst-merkle-science-mumbai-new-delhi-pune-bengaluru-1-to-2-years-210325501333"
+    value="https://www.naukri.com/job-listings-analyst-merkle-science-mumbai"
 )
 submit_button = st.button("Submit")
 

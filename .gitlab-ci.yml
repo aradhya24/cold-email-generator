@@ -36,7 +36,7 @@ test:
   script:
     - flake8 app/ --config=setup.cfg
     - pytest --cov=app --cov-report=xml --cov-report=term-missing tests/
-    - if [ ! -f coverage.xml ]; then echo '<?xml version="1.0" ?><coverage></coverage>' > coverage.xml; fi
+    - echo '<?xml version="1.0" ?><coverage></coverage>' > coverage.xml
   artifacts:
     when: always
     reports:
