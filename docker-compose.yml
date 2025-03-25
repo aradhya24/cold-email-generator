@@ -14,6 +14,7 @@ services:
     volumes:
       - vectorstore:/app/vectorstore
       - resource:/app/app/resource
+      - ./.streamlit:/app/.streamlit
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]

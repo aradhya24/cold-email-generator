@@ -43,6 +43,9 @@ ENV PYTHONUNBUFFERED=1
 # Copy application code
 COPY . .
 
+# Create .streamlit directory
+RUN mkdir -p /app/.streamlit
+
 # Expose the port Streamlit runs on
 EXPOSE 8501
 

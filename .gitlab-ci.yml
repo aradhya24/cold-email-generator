@@ -64,11 +64,13 @@ deploy:
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "mkdir -p ~/app/vectorstore ~/app/app/resource"
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "mkdir -p ~/app/vectorstore ~/app/app/resource ~/app/.streamlit"
+    - echo "GROQ_API_KEY = \"${GROQ_API_KEY}\"" > secrets.toml
     - echo "CI_REGISTRY=${CI_REGISTRY}" > .env.deploy
     - echo "CI_COMMIT_SHA=${CI_COMMIT_SHA}" >> .env.deploy
     - echo "GROQ_API_KEY=${GROQ_API_KEY}" >> .env.deploy
     - scp docker-compose.yml ${AWS_USER}@${AWS_EC2_IP}:~/app/
+    - scp secrets.toml ${AWS_USER}@${AWS_EC2_IP}:~/app/.streamlit/
     - scp .env.deploy ${AWS_USER}@${AWS_EC2_IP}:~/app/.env
     - scp -r app/resource/* ${AWS_USER}@${AWS_EC2_IP}:~/app/app/resource/ || true
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo apt-get update && sudo apt-get install -y docker.io docker-compose curl || true"

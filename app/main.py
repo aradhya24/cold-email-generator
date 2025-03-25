@@ -1,5 +1,6 @@
 """Main application module."""
 
+import os
 import streamlit as st
 from langchain_community.document_loaders import WebBaseLoader
 
@@ -7,9 +8,21 @@ from chains import Chain, EmailChain
 from portfolio import Portfolio, PortfolioProcessor
 from utils import clean_text, format_experience, validate_input
 
-# Initialize session state
+# Initialize email chain with API key from secrets or environment variables
 if 'email_chain' not in st.session_state:
-    st.session_state.email_chain = EmailChain(st.secrets["GROQ_API_KEY"])
+    # Try to get GROQ API key from different sources
+    try:
+        # First try to get from Streamlit secrets
+        groq_api_key = st.secrets["GROQ_API_KEY"]
+    except (FileNotFoundError, KeyError):
+        # Fall back to environment variable
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            st.error("GROQ API Key not found in secrets or environment variables")
+            st.stop()
+    
+    # Initialize the email chain
+    st.session_state.email_chain = EmailChain(groq_api_key)
 
 def create_streamlit_app(llm, portfolio, clean_text):
     st.title("📧 Cold Mail Generator")
