@@ -35,8 +35,8 @@ test:
     - mkdir -p tests && touch tests/__init__.py
   script:
     - flake8 app/ --config=setup.cfg
-    - pytest --cov=app --cov-report=xml --cov-report=term-missing tests/ || true
-    - echo '<?xml version="1.0" ?><coverage></coverage>' > coverage.xml
+    - pytest --cov=app --cov-report=xml --cov-report=term-missing tests/
+    - if [ ! -f coverage.xml ]; then echo '<?xml version="1.0" ?><coverage></coverage>' > coverage.xml; fi
   artifacts:
     when: always
     reports:

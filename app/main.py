@@ -29,7 +29,10 @@ if 'email_chain' not in st.session_state:
 
 # Streamlit UI
 st.title("📧 Cold Mail Generator")
-url_input = st.text_input("Enter a URL:", value="https://www.naukri.com/job-listings-analyst-merkle-science-mumbai-new-delhi-pune-bengaluru-1-to-2-years-210325501333?src=seo_srp&sid=17427435820229996&xp=1&px=1")
+url_input = st.text_input(
+    "Enter a URL:",
+    value="https://www.naukri.com/job-listings-analyst-merkle-science-mumbai-new-delhi-pune-bengaluru-1-to-2-years-210325501333"
+)
 submit_button = st.button("Submit")
 
 if submit_button:
