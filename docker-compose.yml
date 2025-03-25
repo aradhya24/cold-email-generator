@@ -10,11 +10,10 @@ services:
       - PYTHONUNBUFFERED=1
       - GROQ_API_KEY=${GROQ_API_KEY}
       - USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
-    env_file:
-      - .env
+    # Using named volumes instead of bind mounts to avoid ContainerConfig issues
     volumes:
-      - ./vectorstore:/app/vectorstore
-      - ./app/resource:/app/app/resource
+      - vectorstore:/app/vectorstore
+      - resource:/app/app/resource
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
@@ -25,4 +24,9 @@ services:
       driver: "json-file"
       options:
         max-size: "10m"
-        max-file: "3" 
+        max-file: "3"
+        
+# Define named volumes
+volumes:
+  vectorstore:
+  resource: 

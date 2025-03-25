@@ -75,5 +75,5 @@ deploy:
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo usermod -aG docker $USER || true"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo systemctl start docker || true"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo chown -R $USER:$USER ~/app"
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "docker system prune -f || true"
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY && docker-compose pull && docker-compose up -d --force-recreate"
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY && docker-compose down && docker system prune -f || true"
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && docker-compose pull && docker-compose up -d"
