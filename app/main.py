@@ -8,6 +8,9 @@ from chains import Chain, EmailChain
 from portfolio import Portfolio, PortfolioProcessor
 from utils import clean_text, format_experience, validate_input
 
+# Set page config as the first Streamlit command
+st.set_page_config(layout="wide", page_title="Cold Email Generator", page_icon="📧")
+
 # Initialize email chain with API key from secrets or environment variables
 if 'email_chain' not in st.session_state:
     # Try to get GROQ API key from different sources
@@ -86,7 +89,6 @@ if st.button("Generate Email"):
 if __name__ == "__main__":
     chain = Chain()
     portfolio = Portfolio()
-    st.set_page_config(layout="wide", page_title="Cold Email Generator", page_icon="📧")
     create_streamlit_app(chain, portfolio, clean_text)
 
 
