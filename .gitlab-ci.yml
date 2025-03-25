@@ -12,6 +12,7 @@ variables:
   AWS_USER: ${AWS_USER}
   DOCKER_REGISTRY: ${CI_REGISTRY}
   DOCKER_IMAGE: ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA}
+  CI_JOB_TOKEN: ${CI_JOB_TOKEN}
 
 stages:
   - test
@@ -49,8 +50,10 @@ test:
 # Build Docker Image
 build:
   stage: build
-  script: 
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    - echo "Docker registry: $CI_REGISTRY"
+    - echo "Docker image name: $DOCKER_IMAGE"
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
     - docker build -t "$DOCKER_IMAGE" .
     - docker tag "$DOCKER_IMAGE" "${CI_REGISTRY}/aradhya24/cold-email-generator:latest"
     - docker push "$DOCKER_IMAGE"
@@ -86,5 +89,5 @@ deploy:
     - ssh ${AWS_USER}@${AWS_EC2_IP} "if ! systemctl is-active --quiet docker; then sudo systemctl start docker; fi"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo chown -R $USER:$USER ~/app"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "docker system prune -f"
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && docker login -u '$CI_REGISTRY_USER' -p '$CI_REGISTRY_PASSWORD' '$CI_REGISTRY' && docker-compose pull && docker-compose up -d --force-recreate"
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && docker login -u 'gitlab-ci-token' -p '$CI_JOB_TOKEN' '$CI_REGISTRY' && docker-compose pull && docker-compose up -d --force-recreate"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && echo 'Waiting for application to be ready...' && for i in {1..30}; do if curl -s http://localhost:8501/_stcore/health; then echo 'Application is ready!'; break; fi; echo 'Waiting for application to start...'; sleep 10; done"
