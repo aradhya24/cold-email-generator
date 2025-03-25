@@ -10,12 +10,18 @@ services:
       - PYTHONUNBUFFERED=1
       - GROQ_API_KEY=${GROQ_API_KEY}
       - USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+      - STREAMLIT_SERVER_ENABLE_STATIC_SERVING=true
+      - STREAMLIT_LOGGER_LEVEL=debug
+      - STREAMLIT_LOG_LEVEL=debug
+      - STREAMLIT_SERVER_COOKIE_SECRET=your-cookie-secret
+      - STREAMLIT_SERVER_HEADLESS=true
     # Using named volumes instead of bind mounts to avoid ContainerConfig issues
     volumes:
       - vectorstore:/app/vectorstore
       - resource:/app/app/resource
       - ./.streamlit:/app/.streamlit
     restart: unless-stopped
+    command: ["streamlit", "run", "app/main.py", "--server.address=0.0.0.0", "--logger.level=debug"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
       interval: 30s
