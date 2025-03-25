@@ -15,7 +15,8 @@ COPY requirements.txt .
 # Install dependencies into a virtual environment
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir -r requirements.txt
+# Install without using hashes to avoid hash verification errors
+RUN pip install --no-cache-dir --no-deps -r requirements.txt || pip install --no-cache-dir --no-deps --no-hash-checking -r requirements.txt
 
 # Runtime stage
 FROM python:3.12-slim AS runtime

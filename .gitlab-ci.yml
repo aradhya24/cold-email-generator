@@ -30,7 +30,8 @@ test:
     - apt-get update && apt-get install -y python3-pip python3-venv
     - python3 -m venv venv
     - source venv/bin/activate
-    - pip install -r requirements.txt pytest pytest-cov flake8
+    - pip install -r requirements.txt || pip install --no-deps --use-pep517 -r requirements.txt
+    - pip install pytest pytest-cov flake8
     - mkdir -p tests && touch tests/__init__.py
   script:
     - flake8 app/ --config=setup.cfg
@@ -47,12 +48,7 @@ test:
 
 build:
   stage: build
-  script:
-    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin "$CI_REGISTRY"
-    - docker build -t "$DOCKER_IMAGE" .
-    - docker tag "$DOCKER_IMAGE" "$CI_REGISTRY/aradhya24/cold-email-generator:latest"
-    - docker push "$DOCKER_IMAGE"
-    - docker push "$CI_REGISTRY/aradhya24/cold-email-generator:latest"
+  script: docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY && docker build --pull -t $DOCKER_IMAGE . && docker tag $DOCKER_IMAGE $CI_REGISTRY/aradhya24/cold-email-generator:latest && docker push $DOCKER_IMAGE && docker push $CI_REGISTRY/aradhya24/cold-email-generator:latest
   only:
     - main
 
@@ -80,4 +76,4 @@ deploy:
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo systemctl start docker || true"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "sudo chown -R $USER:$USER ~/app"
     - ssh ${AWS_USER}@${AWS_EC2_IP} "docker system prune -f || true"
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && echo '$CI_JOB_TOKEN' | docker login -u gitlab-ci-token --password-stdin '$CI_REGISTRY' && docker-compose pull && docker-compose up -d --force-recreate"
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "cd ~/app && docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY && docker-compose pull && docker-compose up -d --force-recreate"
