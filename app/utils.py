@@ -1,6 +1,7 @@
 """Utility functions for text processing and validation."""
 import re
 import traceback
+import time
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 
@@ -8,33 +9,38 @@ from bs4 import BeautifulSoup
 def clean_text(text: str) -> str:
     """Clean and normalize text content."""
     try:
-        print(f"Original text length: {len(text)}")
+        start_time = time.time()
+        print(f"Starting text cleaning. Original text length: {len(text)}")
         
         # Handle empty text
         if not text or len(text.strip()) == 0:
             print("Warning: Empty text received")
             return ""
+        
+        # Limit text size to prevent processing issues
+        if len(text) > 100000:
+            print(f"Text too large ({len(text)} chars), truncating...")
+            text = text[:100000]
             
         # Remove HTML tags
         try:
+            # Use a faster parser
             soup = BeautifulSoup(text, 'html.parser')
-            text = soup.get_text(separator=' ')
+            text = soup.get_text(separator=' ', strip=True)
             print(f"Text after HTML parsing: {len(text)} characters")
         except Exception as e:
             print(f"Error in BeautifulSoup parsing: {e}")
             # Fallback to regex if BeautifulSoup fails
             text = re.sub(r'<[^>]*?>', ' ', text)
             
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Remove special characters but keep basic punctuation
-        text = re.sub(r'[^\w\s.,!?-]', '', text)
-        
-        # Normalize whitespace
+        # Optimize text cleaning by combining operations
+        # Remove extra whitespace and normalize in one step
         text = ' '.join(text.split())
         
-        print(f"Cleaned text length: {len(text)}")
+        # Remove special characters but keep basic punctuation - limit to essential operations
+        text = re.sub(r'[^\w\s.,!?-]', '', text)
+        
+        print(f"Text cleaning completed in {time.time() - start_time:.2f} seconds. Final length: {len(text)}")
         return text.strip()
     except Exception as e:
         print(f"Error cleaning text: {e}")
@@ -46,25 +52,23 @@ def clean_text(text: str) -> str:
 def format_experience(experience: str) -> str:
     """Format experience string to a standard format."""
     try:
-        # Remove any non-numeric characters except dots
-        years = re.sub(r'[^\d.]', '', experience)
-        
-        # Convert to float if possible
-        try:
-            years = float(years)
-            return f"{years:.1f} years"
-        except ValueError:
-            return experience
+        # Simple formatting to avoid processing delays
+        return experience.strip() if experience else "Not specified"
     except Exception as e:
         print(f"Error formatting experience: {e}")
-        return experience
+        return "Not specified"
 
 
 def validate_input(data: Dict[str, Any]) -> List[str]:
     """Validate input data and return list of errors."""
     errors = []
     
-    required_fields = ['title', 'company', 'location']
+    # Simple validation to avoid processing delays
+    if not data:
+        errors.append("No data provided")
+        return errors
+    
+    required_fields = ['title', 'company']
     for field in required_fields:
         if not data.get(field):
             errors.append(f"{field.capitalize()} is required")
@@ -75,13 +79,18 @@ def validate_input(data: Dict[str, Any]) -> List[str]:
 def process_portfolio_data(data):
     """Process the portfolio data into a more usable format."""
     skills = set()
-    for skill in data['skills'].split(','):
-        skills.add(skill.strip().lower())
     
-    for project in data['projects'].split(','):
-        project_skills = project.split(':')
-        if len(project_skills) > 1:
-            for skill in project_skills[1].split('&'):
-                skills.add(skill.strip().lower())
+    # Add skills directly from the skills field
+    if 'skills' in data:
+        for skill in data['skills'].split(','):
+            skills.add(skill.strip().lower())
+    
+    # Extract skills from projects if available
+    if 'projects' in data:
+        for project in data['projects'].split(','):
+            project_skills = project.split(':')
+            if len(project_skills) > 1:
+                for skill in project_skills[1].split('&'):
+                    skills.add(skill.strip().lower())
     
     return list(skills)

@@ -2,12 +2,12 @@
 
 import os
 import time
+import signal
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from langchain.chains import LLMChain
 from langchain_community.document_loaders import WebBaseLoader
 
 load_dotenv()
@@ -21,8 +21,16 @@ WebBaseLoader.requests_kwargs = {
                       'AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/122.0.0.0 Safari/537.36')
         )
-    }
+    },
+    'timeout': 30  # Add global timeout
 }
+
+# Timeout handler
+class TimeoutError(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("Operation timed out")
 
 
 class EmailChain:
@@ -38,7 +46,8 @@ class EmailChain:
             groq_api_key=groq_api_key,
             model_name="mixtral-8x7b-32768",
             temperature=0.7,
-            max_tokens=32768
+            max_tokens=4096,  # Reduced to prevent hanging
+            timeout=60  # 60 second timeout
         )
 
         # Create the email prompt
@@ -85,12 +94,24 @@ class EmailChain:
             The generated email text
         """
         try:
+            # Set timeout
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(60)  # 60 second timeout
+            
+            start_time = time.time()
+            print("Starting email generation...")
+            
             # Generate email
             result = self.chain.invoke({
                 "recipient_info": recipient_info,
                 "sender_info": sender_info,
                 "purpose": purpose
             })
+            
+            # Cancel timeout
+            signal.alarm(0)
+            
+            print(f"Email generation completed in {time.time() - start_time:.2f} seconds")
             
             # Extract content from result
             email_content = result.content if hasattr(result, 'content') else str(result)
@@ -101,6 +122,9 @@ class EmailChain:
                 return "Error: Failed to generate a proper email. Please try again."
             
             return email_content
+        except TimeoutError:
+            print("Email generation timed out after 60 seconds")
+            return "Email generation timed out. Please try again with a simpler request."
         except Exception as e:
             print(f"Error generating email: {e}")
             return f"Error generating email: {str(e)}. Please try again."
@@ -115,9 +139,10 @@ class Chain:
             api_key=os.getenv("GROQ_API_KEY"),
             model_name="mixtral-8x7b-32768",
             temperature=0.7,
-            max_tokens=32768,
+            max_tokens=4096,  # Reduced to prevent hanging
             top_p=1,
-            verbose=True
+            verbose=True,
+            timeout=60  # 60 second timeout
         )
         
         # Create the job extraction prompt
@@ -168,9 +193,13 @@ class Chain:
             print(f"Text length for job extraction: {len(text)}")
             
             # Limit text length if too long
-            if len(text) > 10000:
-                print(f"Truncating text from {len(text)} to 10000 characters")
-                text = text[:10000]
+            if len(text) > 5000:  # Reduced further to prevent hanging
+                print(f"Truncating text from {len(text)} to 5000 characters")
+                text = text[:5000]
+            
+            # Set timeout
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(60)  # 60 second timeout
             
             # Add a timeout to prevent hanging
             start_time = time.time()
@@ -178,6 +207,9 @@ class Chain:
             
             # Invoke the job chain
             result = self.job_chain.invoke({"text": text})
+            
+            # Cancel timeout
+            signal.alarm(0)
             
             # Log completion time
             print(f"Job extraction completed in {time.time() - start_time:.2f} seconds")
@@ -215,6 +247,16 @@ class Chain:
             
             print(f"Extracted {len(jobs)} job(s)")
             return jobs
+        except TimeoutError:
+            print("Job extraction timed out after 60 seconds")
+            return [{
+                'title': 'Job Information Extraction Timed Out',
+                'company': 'Unknown',
+                'location': 'Unknown',
+                'experience': 'Not specified',
+                'skills': ['Not available due to timeout'],
+                'description': 'The job extraction process timed out. Try again with a simpler job posting.'
+            }]
         except Exception as e:
             print(f"Error extracting jobs: {e}")
             # Create a minimal job record to allow the process to continue
@@ -243,11 +285,23 @@ class Chain:
             # Format portfolio links
             portfolio_links = "\n".join(links) if links else "No portfolio links available"
             
+            # Set timeout
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(60)  # 60 second timeout
+            
+            start_time = time.time()
+            print("Starting email generation...")
+            
             # Generate email
             result = self.email_chain.invoke({
                 "job_details": job_details,
                 "portfolio_links": portfolio_links
             })
+            
+            # Cancel timeout
+            signal.alarm(0)
+            
+            print(f"Email generation completed in {time.time() - start_time:.2f} seconds")
             
             # Extract content from result
             email_content = result.content if hasattr(result, 'content') else str(result)
@@ -258,6 +312,9 @@ class Chain:
                 return "Error: Failed to generate a proper email. Please try again."
             
             return email_content
+        except TimeoutError:
+            print("Email generation timed out after 60 seconds")
+            return "Email generation timed out. Please try again with a simpler request."
         except Exception as e:
             print(f"Error generating email: {e}")
             return "Error generating email. Please try again."
