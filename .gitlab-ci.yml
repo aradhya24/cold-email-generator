@@ -49,11 +49,10 @@ test:
 # ✅ Build Docker Image
 build:
   stage: build
-  before_script:
+  script:
     - echo "Docker registry: $CI_REGISTRY"
     - echo "Docker image tag: $DOCKER_IMAGE"
     - echo "GitLab project: $CI_PROJECT_PATH"
-  script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker build --pull -t "$DOCKER_IMAGE" .
     - docker tag "$DOCKER_IMAGE" "${CI_REGISTRY}/aradhya24/cold-email-generator:latest"
