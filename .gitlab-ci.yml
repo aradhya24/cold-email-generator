@@ -156,7 +156,7 @@ deploy:
 
     # Create configuration files
     echo "Creating docker-compose configuration..."
-    cat > docker-compose-template.yml << 'EOF'
+    cat << \EOF > docker-compose.yml
 version: '3'
 services:
   app:
@@ -175,12 +175,12 @@ services:
     depends_on:
       - app
 EOF
-
-    # Substitute environment variables
-    cat docker-compose-template.yml | envsubst > docker-compose.yml
+    sed -i "s|\\\${CI_REGISTRY}|${CI_REGISTRY}|g" docker-compose.yml
+    sed -i "s|\\\${CI_COMMIT_SHA}|${CI_COMMIT_SHA}|g" docker-compose.yml
+    sed -i "s|\\\${GROQ_API_KEY}|${GROQ_API_KEY}|g" docker-compose.yml
     
     echo "Creating nginx configuration..."
-    cat > nginx.conf << 'EOF'
+    cat << \EOF > nginx.conf
 server {
   listen 80;
   server_name _;
