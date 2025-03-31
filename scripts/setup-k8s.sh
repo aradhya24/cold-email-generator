@@ -68,6 +68,19 @@ mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
+# Make KUBECONFIG persistent between SSH sessions
+echo 'export KUBECONFIG=$HOME/.kube/config' >> $HOME/.bashrc
+echo 'export KUBECONFIG=$HOME/.kube/config' >> $HOME/.profile
+
+# Export KUBECONFIG for current session
+export KUBECONFIG=$HOME/.kube/config
+
+# Copy kubeconfig to /etc/profile.d to make it available for all users and sessions
+sudo tee /etc/profile.d/kubeconfig.sh > /dev/null << 'EOF'
+export KUBECONFIG=$HOME/.kube/config
+EOF
+sudo chmod +x /etc/profile.d/kubeconfig.sh
+
 # Ensure we can reach the Kubernetes API
 echo "Waiting for Kubernetes API to become available..."
 ATTEMPTS=0
@@ -131,6 +144,24 @@ kubectl wait --namespace ingress-nginx \
   --for=condition=ready pod \
   --selector=app.kubernetes.io/component=controller \
   --timeout=120s || echo "Ingress controller pods still not ready, proceeding anyway"
+
+# Create a validation file to test kubeconfig persistence
+echo "Testing kubectl configuration persistence..."
+cat > $HOME/test-k8s.sh << 'EOF'
+#!/bin/bash
+if kubectl get nodes; then
+  echo "Kubernetes API is accessible!"
+  exit 0
+else
+  echo "Kubernetes API is NOT accessible!"
+  exit 1
+fi
+EOF
+chmod +x $HOME/test-k8s.sh
+
+# Run the test immediately to verify
+echo "Verifying kubectl access before proceeding..."
+$HOME/test-k8s.sh
 
 echo "Kubernetes setup completed successfully!"
 echo "You can now deploy applications to your Kubernetes cluster."

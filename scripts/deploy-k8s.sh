@@ -1,18 +1,70 @@
 #!/bin/bash
 set -e
 
+# Print debugging information
+echo "==== Kubernetes Environment Debug Info ===="
+echo "USER: $(whoami)"
+echo "HOME: $HOME"
+echo "KUBECONFIG: $KUBECONFIG"
+echo "Config file exists: $([ -f "$HOME/.kube/config" ] && echo "Yes" || echo "No")"
+echo "Admin conf exists: $([ -f "/etc/kubernetes/admin.conf" ] && echo "Yes" || echo "No")"
+echo "========================================"
+
+# Ensure KUBECONFIG is set
+if [ -z "$KUBECONFIG" ]; then
+  # Try to find and use the kubeconfig file
+  if [ -f "$HOME/.kube/config" ]; then
+    export KUBECONFIG=$HOME/.kube/config
+    echo "Set KUBECONFIG to $KUBECONFIG"
+  elif [ -f "/etc/kubernetes/admin.conf" ]; then
+    # If admin.conf exists but user doesn't have their own config, create it
+    mkdir -p $HOME/.kube
+    sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+    sudo chown $(id -u):$(id -g) $HOME/.kube/config
+    export KUBECONFIG=$HOME/.kube/config
+    echo "Created and set KUBECONFIG to $KUBECONFIG"
+  else
+    echo "No Kubernetes config found. Kubernetes may not be initialized."
+  fi
+fi
+
 # Check if the Kubernetes API is available
 echo "Checking Kubernetes API availability..."
 if ! kubectl get nodes &>/dev/null; then
-  echo "Error: Cannot reach Kubernetes API. Waiting for 60 seconds to see if it comes online..."
-  sleep 60
+  echo "Error: Cannot reach Kubernetes API. Trying alternative approaches..."
   
+  # Try with explicit kubeconfig
+  if [ -f "/etc/kubernetes/admin.conf" ]; then
+    echo "Trying with admin.conf..."
+    if ! KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes &>/dev/null; then
+      echo "Still cannot access API with admin.conf"
+    else
+      echo "Access worked with admin.conf, using that..."
+      sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+      sudo chown $(id -u):$(id -g) $HOME/.kube/config
+      export KUBECONFIG=$HOME/.kube/config
+    fi
+  fi
+  
+  # Try again
   if ! kubectl get nodes &>/dev/null; then
-    echo "Error: Kubernetes API is still not available. Check if Kubernetes is properly initialized."
-    echo "You might need to run the setup script again."
-    exit 1
+    echo "Error: Cannot reach Kubernetes API even after recovery attempts."
+    echo "Waiting for 60 seconds in case the API is still starting up..."
+    sleep 60
+    
+    if ! kubectl get nodes &>/dev/null; then
+      echo "Error: Kubernetes API is still not available."
+      echo "Please check the Kubernetes setup and ensure the API server is running."
+      echo "You can run the following to view API server status:"
+      echo "  sudo systemctl status kubelet"
+      echo "  sudo crictl ps | grep kube-apiserver"
+      exit 1
+    fi
   fi
 fi
+
+echo "Kubernetes API is accessible!"
+kubectl get nodes
 
 # Create namespace if it doesn't exist
 echo "Ensuring namespace exists..."
@@ -23,10 +75,23 @@ fi
 # Apply deployment with substituted environment variables
 echo "Deploying application with CI_REGISTRY=${CI_REGISTRY} and CI_COMMIT_SHA=${CI_COMMIT_SHA}"
 
+# Check if deployment file exists and show its content for debugging
+echo "Checking deployment file..."
+if [ -f ~/k8s/deployment.yaml ]; then
+  echo "Found deployment file at ~/k8s/deployment.yaml"
+  echo "First 10 lines of deployment file:"
+  head -n 10 ~/k8s/deployment.yaml
+else
+  echo "Warning: deployment.yaml not found at ~/k8s/deployment.yaml"
+  echo "Current directory: $(pwd)"
+  echo "Files in ~/k8s/:"
+  ls -la ~/k8s/ || echo "Directory doesn't exist or can't be accessed"
+fi
+
 # Apply deployment
+echo "Applying deployment..."
 kubectl apply -f ~/k8s/deployment.yaml || {
-  echo "Error applying deployment. Retrying with full path and checking file content..."
-  cat ~/k8s/deployment.yaml
+  echo "Error applying deployment. Retrying with --validate=false..."
   kubectl apply -f ~/k8s/deployment.yaml --validate=false
 }
 
