@@ -79,6 +79,10 @@ deploy:
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
     - chmod 600 ~/.ssh/config
+    # Print public key for debugging
+    - echo "### SSH public key being used (add this to authorized_keys on EC2): ###"
+    - ssh-keygen -y -f ~/.ssh/id_rsa
+    - echo "###################################################################"
   script: |
     # Configure AWS credentials
     export AWS_DEFAULT_REGION=us-east-1
@@ -120,11 +124,25 @@ deploy:
     echo "Waiting for SSH to become available..."
     for i in {1..10}; do
       echo "Attempt $i: Testing SSH connection..."
-      if ssh -o ConnectTimeout=10 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"; then
+      if ssh -v -o ConnectTimeout=10 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"; then
         echo "SSH connection established!"
         break
       else
         echo "SSH connection failed. Waiting 30 seconds before retry..."
+        if [ $i -eq 3 ]; then
+          echo "Three failed attempts. Printing instance details for debugging:"
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=public-ip-address,Values=$EC2_IP" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+          aws ec2 describe-instances --instance-ids $INSTANCE_ID
+          
+          echo "This EC2 instance was likely launched with a different key pair."
+          echo "Please either:"
+          echo "1. Update AWS_SSH_KEY in GitLab CI/CD variables to match the key used to launch this instance"
+          echo "2. Terminate this instance and let the pipeline create a new one with the correct key"
+          echo "3. SSH into the instance using the correct key and add the above public key to ~/.ssh/authorized_keys"
+        fi
         sleep 30
       fi
       

@@ -15,7 +15,7 @@ export AWS_DEFAULT_REGION=us-east-1
 # Create security group
 echo "Creating security group for Cold Email Generator..."
 SG_ID=$(aws ec2 create-security-group \
-    --group-name cold-email-sg \
+    --group-name cold-email-sg-$(date +%s) \
     --description "Security group for Cold Email Generator" \
     --query "GroupId" \
     --output text)
@@ -57,22 +57,16 @@ aws ec2 create-tags \
     --resources $SG_ID \
     --tags Key=Name,Value=cold-email-sg
 
-# Create key pair if it doesn't exist
-KEY_NAME="cold-email-key"
-KEY_EXISTS=$(aws ec2 describe-key-pairs --query "KeyPairs[?KeyName=='$KEY_NAME'].KeyName" --output text || echo "")
+# Create a temporary key pair for this deployment
+KEY_NAME="cold-email-key-$(date +%s)"
+echo "Creating new key pair: $KEY_NAME..."
 
-if [ -z "$KEY_EXISTS" ]; then
-    echo "Creating new key pair..."
-    aws ec2 create-key-pair \
-        --key-name $KEY_NAME \
-        --query "KeyMaterial" \
-        --output text > ~/.ssh/cold-email-key.pem
-    chmod 400 ~/.ssh/cold-email-key.pem
-    echo "Key pair saved to ~/.ssh/cold-email-key.pem"
-    echo "IMPORTANT: Save this key securely and add it to GitLab CI/CD variables as AWS_SSH_KEY"
-else
-    echo "Key pair $KEY_NAME already exists"
-fi
+# Import the GitLab CI/CD SSH key directly into AWS
+PUB_KEY=$(ssh-keygen -y -f ~/.ssh/id_rsa)
+echo "Importing SSH public key into AWS..."
+aws ec2 import-key-pair \
+    --key-name $KEY_NAME \
+    --public-key-material "$(echo $PUB_KEY | base64)"
 
 # Launch EC2 instance
 echo "Launching EC2 instance..."
@@ -109,8 +103,11 @@ PUBLIC_IP=$(aws ec2 describe-instances \
 echo "========================================================"
 echo "Instance ready with public IP: $PUBLIC_IP"
 echo "========================================================"
-echo "Update your GitLab CI/CD variable AWS_EC2_IP with this IP"
-echo "Also ensure you've set AWS_USER=ubuntu and added your SSH key"
-echo "Wait a few minutes for the instance to complete initialization"
-echo "You can test SSH with: ssh -i ~/.ssh/cold-email-key.pem ubuntu@$PUBLIC_IP"
-echo "========================================================" 
+echo "The public key used to create this instance is:"
+echo "$PUB_KEY"
+echo "========================================================"
+echo "Testing SSH connection to new instance..."
+# Give the instance a bit more time to initialize SSH
+sleep 30
+ssh -o ConnectTimeout=30 -o BatchMode=yes -o StrictHostKeyChecking=no ubuntu@$PUBLIC_IP "echo SSH connection successful" || echo "SSH still not ready, but instance is launched"
+echo "=========================================================" 
