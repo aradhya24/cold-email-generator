@@ -47,6 +47,9 @@ deploy_setup:
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    - export AWS_DEFAULT_REGION=us-east-1
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
     - chmod +x scripts/get_healthy_instance.sh
     - EC2_IP=$(./scripts/get_healthy_instance.sh)
     - echo "Using EC2 instance with IP $EC2_IP for deployment"
@@ -232,6 +235,9 @@ monitor:
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    - export AWS_DEFAULT_REGION=us-east-1
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
     - chmod +x scripts/get_healthy_instance.sh
     - EC2_IP=$(./scripts/get_healthy_instance.sh)
     - ssh ${AWS_USER}@${EC2_IP} "kubectl get pods -n cold-email"
