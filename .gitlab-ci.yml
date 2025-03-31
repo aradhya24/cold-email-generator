@@ -92,6 +92,7 @@ deploy:
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    - ssh ${AWS_USER}@${AWS_EC2_IP} "mkdir -p ~/k8s ~/scripts"
     - envsubst < k8s/deployment.yaml > deployment.yaml
     - scp deployment.yaml ${AWS_USER}@${AWS_EC2_IP}:~/k8s/deployment.yaml
     - scp scripts/deploy-k8s.sh ${AWS_USER}@${AWS_EC2_IP}:~/scripts/
