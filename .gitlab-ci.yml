@@ -172,9 +172,9 @@ deploy:
     
     # Execute setup script with a direct approach
     echo "Setting up the EC2 instance with required dependencies..."
-    ssh ${AWS_USER}@${EC2_IP} "sudo apt-get update && sudo apt-get install -y docker.io"
+    ssh ${AWS_USER}@${EC2_IP} "sudo apt-get update && sudo apt-get install -y docker.io nginx"
     ssh ${AWS_USER}@${EC2_IP} "sudo systemctl enable docker && sudo systemctl start docker"
-    ssh ${AWS_USER}@${EC2_IP} "sudo docker run -d --name nginx -p 80:80 nginx"
+    ssh ${AWS_USER}@${EC2_IP} "sudo systemctl enable nginx && sudo systemctl start nginx"
     
     echo "Creating simple Kubernetes namespace directory structure..."
     ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s/namespaces/cold-email"
@@ -226,26 +226,30 @@ deploy:
     EOF
     
     scp -v nginx.conf ${AWS_USER}@${EC2_IP}:~/nginx.conf
-    ssh ${AWS_USER}@${EC2_IP} "sudo cp ~/nginx.conf /etc/nginx/conf.d/default.conf || sudo mkdir -p /etc/nginx/conf.d/ && sudo cp ~/nginx.conf /etc/nginx/conf.d/default.conf"
-    ssh ${AWS_USER}@${EC2_IP} "sudo docker exec nginx nginx -s reload || echo 'Failed to reload nginx, continuing anyway.'"
+    ssh ${AWS_USER}@${EC2_IP} "sudo mkdir -p /etc/nginx/conf.d/ && sudo cp ~/nginx.conf /etc/nginx/conf.d/default.conf && sudo systemctl reload nginx"
     
     # Get the public IP of the instance for access
     PUBLIC_IP=$(aws ec2 describe-instances \
-      --instance-ids $(aws ec2 describe-instances \
+      --filters "Name=instance-id,Values=$(aws ec2 describe-instances \
       --filters "Name=public-ip-address,Values=$EC2_IP" \
       --query "Reservations[0].Instances[0].InstanceId" \
-      --output text) \
+      --output text)" \
       --query "Reservations[0].Instances[0].PublicIpAddress" \
       --output text)
+    
+    # If PUBLIC_IP is empty, use EC2_IP
+    if [ -z "$PUBLIC_IP" ]; then
+      PUBLIC_IP=$EC2_IP
+    fi
     
     echo "==========================================================="
     echo "Application deployed successfully and is accessible at:"
     echo "http://${PUBLIC_IP}"
     echo "==========================================================="
     
-    # Update the LB_DNS variable to use the public IP
+    # Update the LB_DNS variable to use the public IP (fixing artifact format)
     echo "Updating LB_DNS variable to use the instance public IP..."
-    echo "export LB_DNS=${PUBLIC_IP}" > lb_dns.env
+    echo "LB_DNS=${PUBLIC_IP}" > lb_dns.env
     
     echo "Deployment process completed successfully!"
   environment:
