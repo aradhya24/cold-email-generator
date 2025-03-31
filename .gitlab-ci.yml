@@ -188,7 +188,9 @@ deploy:
     
     # Create a simple configuration to run the application without Kubernetes
     echo "Creating a simple docker-compose configuration..."
-    cat > docker-compose.yml << 'EOF'
+    
+    # Generate docker-compose.yml file with variables properly expanded
+    cat > docker-compose.yml << EOL
 version: '3'
 services:
   app:
@@ -206,11 +208,13 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
     depends_on:
       - app
-EOF
+EOL
     
     # Create nginx configuration
     echo "Creating nginx configuration..."
-    cat > nginx.conf << 'EOF'
+    
+    # Generate nginx.conf file
+    cat > nginx.conf << EOL
 server {
   listen 80;
   server_name _;
@@ -218,12 +222,12 @@ server {
   location / {
     proxy_pass http://app:8501;
     proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
+    proxy_set_header Host \$host;
   }
 }
-EOF
+EOL
     
     # Copy the docker-compose and nginx files
     scp -v docker-compose.yml ${AWS_USER}@${EC2_IP}:~/docker-compose.yml
