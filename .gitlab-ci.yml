@@ -64,9 +64,15 @@ deploy_setup:
 
 deploy:
   stage: deploy
-  image: amazon/aws-cli:latest
+  image: python:3.9-slim
   before_script:
-    - apt-get update && apt-get install -y openssh-client gettext-base
+    - apt-get update
+    - apt-get install -y curl unzip openssh-client gettext-base
+    # Install AWS CLI v2
+    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    - unzip awscliv2.zip
+    - ./aws/install
+    # Setup SSH
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
@@ -74,17 +80,35 @@ deploy:
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
     - chmod 600 ~/.ssh/config
   script: |
-    # Configure AWS CLI with environment variables
+    # Configure AWS credentials
     export AWS_DEFAULT_REGION=us-east-1
     export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
     
-    # Make the script executable
-    chmod +x scripts/get_healthy_instance.sh
+    # Use a static EC2 IP for now until we can debug the script
+    if [ -n "$AWS_EC2_IP" ]; then
+      EC2_IP=$AWS_EC2_IP
+      echo "Using provided EC2 IP: $EC2_IP"
+    else
+      # Try to find an instance directly
+      echo "Finding EC2 instance with tag Name=cold-email-instance"
+      EC2_IP=$(aws ec2 describe-instances \
+        --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+        --query "Reservations[0].Instances[0].PublicIpAddress" \
+        --output text)
+      
+      if [ "$EC2_IP" == "None" ] || [ -z "$EC2_IP" ]; then
+        echo "No instance found with tag. Using default EC2 IP from environment"
+        # Default to the provided IP if no instance is found
+        EC2_IP=${AWS_EC2_IP}
+      fi
+    fi
     
-    # Get a healthy EC2 instance IP
-    EC2_IP=$(./scripts/get_healthy_instance.sh)
     echo "Deploying to instance: $EC2_IP"
+    
+    # Check SSH connectivity
+    echo "Testing SSH connection..."
+    ssh -o ConnectTimeout=10 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"
     
     # Create directories on the instance
     ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
