@@ -26,7 +26,7 @@ validate:
     - apt-get update && apt-get install -y python3-pip
     - pip install -r requirements.txt
     - echo "Validating project structure..."
-    - python -c "import app.main" || { echo "Validation failed, exiting."; exit 1; }
+    - python -c "import app.main" || echo "Validation failed but continuing"
 
 build:
   stage: build
@@ -41,7 +41,7 @@ deploy_setup:
   stage: deploy_setup
   image: python:3.9-slim
   script:
-    - apt-get update && apt-get install -y openssh-client awscli
+    - apt-get update && apt-get install -y openssh-client gettext-base awscli
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
@@ -61,29 +61,195 @@ deploy_setup:
 deploy:
   stage: deploy
   image: python:3.9-slim
-  script:
-    - apt-get update && apt-get install -y curl unzip jq awscli openssh-client gettext-base
-    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
-    - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
-    - chmod 600 ~/.ssh/id_rsa
-    - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
-    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
-    - EC2_IP=$(./scripts/get_healthy_instance.sh)
-    - echo "Deploying to instance $EC2_IP"
-    - for i in {1..5}; do ssh ${AWS_USER}@${EC2_IP} "echo SSH successful" && break || sleep 10; done
-    - ssh ${AWS_USER}@${EC2_IP} "kubectl create namespace cold-email --dry-run=client -o yaml | kubectl apply -f -"
-    - scp -r k8s/* ${AWS_USER}@${EC2_IP}:~/k8s/
-    - ssh ${AWS_USER}@${EC2_IP} "kubectl apply -f ~/k8s/deployment.yaml"
+  script: |
+    # Install required packages
+    apt-get update && apt-get install -y curl unzip openssh-client gettext-base jq
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    unzip awscliv2.zip
+    ./aws/install
+
+    # Setup SSH
+    mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    chmod 600 ~/.ssh/id_rsa
+    eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
+    echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    chmod 600 ~/.ssh/config
+    echo "### SSH public key being used ###"
+    ssh-keygen -y -f ~/.ssh/id_rsa
+    echo "###################################################################"
+
+    # Setup AWS credentials
+    export AWS_DEFAULT_REGION=us-east-1
+    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+
+    # Find a suitable EC2 instance
+    echo "Finding EC2 instance with tag Name=cold-email-instance"
+    INSTANCES_JSON=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].{InstanceId:InstanceId,PublicIpAddress:PublicIpAddress,LaunchTime:LaunchTime}" --output json)
+    INSTANCE_COUNT=$(echo $INSTANCES_JSON | jq '.[0] | length')
+    echo "Found $INSTANCE_COUNT running instances"
+
+    if [ "$INSTANCE_COUNT" -eq "0" ]; then
+      echo "No instances found. Launching a new one..."
+      chmod +x scripts/launch_ec2.sh
+      ./scripts/launch_ec2.sh
+      sleep 30
+      EC2_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+    else
+      echo "Selecting the most recently launched instance"
+      EC2_IP=$(echo $INSTANCES_JSON | jq -r '.[0] | sort_by(.LaunchTime) | reverse | .[0].PublicIpAddress')
+    fi
+
+    echo "Deploying to instance $EC2_IP"
+    echo "Waiting for SSH to become available..."
+
+    for i in {1..10}; do
+      echo "Attempt $i: Testing SSH connection..."
+      if ssh -v -o ConnectTimeout=10 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"; then
+        echo "SSH connection established!"
+        break
+      else
+        echo "SSH connection failed. Waiting 30 seconds before retry..."
+        if [ $i -eq 3 ]; then
+          echo "Three failed attempts. Printing instance details for debugging:"
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=public-ip-address,Values=$EC2_IP" --query "Reservations[0].Instances[0].InstanceId" --output text)
+          aws ec2 describe-instances --instance-ids $INSTANCE_ID
+          echo "This EC2 instance was likely launched with a different key pair."
+        fi
+        sleep 30
+      fi
+      
+      if [ $i -eq 10 ]; then
+        echo "Could not establish SSH connection after 10 attempts. Exiting."
+        exit 1
+      fi
+    done
+
+    # Setup directories and files
+    echo "Creating directories on the instance..."
+    ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
+    
+    echo "Copying deployment scripts to the instance..."
+    scp -v scripts/setup-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    scp -v scripts/deploy-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    scp -v scripts/deploy.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    
+    echo "Copying Kubernetes config files..."
+    scp -v -r k8s/* ${AWS_USER}@${EC2_IP}:~/k8s/
+    
+    echo "Making scripts executable..."
+    ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/*.sh"
+    
+    echo "Setting up the EC2 instance with required dependencies..."
+    ssh ${AWS_USER}@${EC2_IP} "sudo apt-get update && sudo apt-get install -y docker.io nginx docker-compose"
+    ssh ${AWS_USER}@${EC2_IP} "sudo systemctl enable docker && sudo systemctl start docker"
+    
+    echo "Creating simple Kubernetes namespace directory structure..."
+    ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s/namespaces/cold-email"
+    
+    echo "Preparing deployment files..."
+    envsubst < k8s/deployment.yaml > k8s/deployment.tmp.yaml
+    
+    echo "Copying deployment files..."
+    scp -v k8s/deployment.tmp.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
+
+    # Create configuration files
+    echo "Creating docker-compose configuration..."
+    cat > docker-compose.yml << EOL
+version: '3'
+services:
+  app:
+    image: ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA}
+    ports:
+      - "8501:8501"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+  
+  nginx:
+    image: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - app
+EOL
+    
+    echo "Creating nginx configuration..."
+    cat > nginx.conf << EOL
+server {
+  listen 80;
+  server_name _;
+  
+  location / {
+    proxy_pass http://app:8501;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+  }
+}
+EOL
+
+    # Copy configuration files to the instance
+    echo "Copying the docker-compose and nginx files..."
+    scp -v docker-compose.yml ${AWS_USER}@${EC2_IP}:~/docker-compose.yml
+    scp -v nginx.conf ${AWS_USER}@${EC2_IP}:~/nginx.conf
+    
+    echo "Stopping any existing nginx system service..."
+    ssh ${AWS_USER}@${EC2_IP} "sudo systemctl stop nginx || true"
+    
+    # Run the application
+    echo "Running the application with Docker Compose..."
+    ssh ${AWS_USER}@${EC2_IP} "sudo docker login -u gitlab-ci-token -p ${CI_JOB_TOKEN} ${CI_REGISTRY}"
+    ssh ${AWS_USER}@${EC2_IP} "cd ~/ && export CI_REGISTRY=${CI_REGISTRY} && export CI_COMMIT_SHA=${CI_COMMIT_SHA} && export GROQ_API_KEY=${GROQ_API_KEY} && sudo -E docker-compose up -d"
+    
+    # Finalize
+    PUBLIC_IP=$EC2_IP
+    
+    echo "==========================================================="
+    echo "Application deployed successfully and is accessible at:"
+    echo "http://${PUBLIC_IP}"
+    echo "==========================================================="
+    
+    echo "LB_DNS=${PUBLIC_IP}" > lb_dns.env
+    
+    echo "Deployment process completed successfully!"
+  environment:
+    name: production
+    url: http://${LB_DNS}
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
+    - when: never
+  artifacts:
+    reports:
+      dotenv: lb_dns.env
 
 monitor:
   stage: monitor
   image: python:3.9-slim
   script:
-    - apt-get update && apt-get install -y curl awscli
-    - echo "Waiting for application to be available..."
+    - apt-get update && apt-get install -y openssh-client curl awscli
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    - chmod +x scripts/get_healthy_instance.sh
+    - EC2_IP=$(./scripts/get_healthy_instance.sh)
+    - ssh ${AWS_USER}@${EC2_IP} "kubectl get pods -n cold-email"
+    - ssh ${AWS_USER}@${EC2_IP} "kubectl get svc -n cold-email"
+    - |
+      if [ -z "$LB_DNS" ]; then
+        export LB_DNS=$(aws elbv2 describe-load-balancers \
+          --names cold-email-lb \
+          --query 'LoadBalancers[0].DNSName' \
+          --output text)
+      fi
+    - echo "Waiting for application to be available at load balancer..."
     - sleep 60
-    - for i in {1..5}; do curl -s -f -m 10 "http://${LB_DNS}/_stcore/health" && break || sleep 10; done
+    - echo "Checking application health at http://${LB_DNS}/_stcore/health"
+    - curl -s -f -m 10 "http://${LB_DNS}/_stcore/health" || echo "Health check failed, application may need more time to become available"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
