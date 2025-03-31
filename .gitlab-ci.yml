@@ -64,38 +64,35 @@ deploy_setup:
 
 deploy:
   stage: deploy
-  image: python:3.9-slim
-  only:
-    - main
-  script:
-    - apt-get update && apt-get install -y openssh-client gettext-base awscli
+  image: amazon/aws-cli:latest
+  before_script:
+    - apt-get update && apt-get install -y openssh-client
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
-    
-    # Get healthy EC2 instance
+    - chmod 600 ~/.ssh/config
+    # Configure AWS CLI with region
+    - aws configure set region us-east-1
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
     - chmod +x scripts/get_healthy_instance.sh
     - EC2_IP=$(./scripts/get_healthy_instance.sh)
-    - echo "Using EC2 instance with IP $EC2_IP for deployment"
-    
-    # Get load balancer DNS if not set
-    - |
-      if [ -z "$LB_DNS" ]; then
-        export LB_DNS=$(aws elbv2 describe-load-balancers \
-          --names cold-email-lb \
-          --query 'LoadBalancers[0].DNSName' \
-          --output text)
-        echo "Load balancer DNS: $LB_DNS"
-      fi
-    
-    # Update deployment file with variables
-    - LB_DNS=$LB_DNS envsubst < k8s/deployment.yaml > deployment.yaml
-    - scp deployment.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
-    - scp scripts/deploy-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
-    - ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/deploy-k8s.sh"
-    - ssh ${AWS_USER}@${EC2_IP} "export CI_REGISTRY=${CI_REGISTRY} && export CI_COMMIT_SHA=${CI_COMMIT_SHA} && export LB_DNS=${LB_DNS} && ~/scripts/deploy-k8s.sh"
+    - echo "Deploying to instance: $EC2_IP"
+  script:
+    - ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
+    - envsubst < k8s/deployment.yaml > k8s/deployment.tmp.yaml
+    - scp k8s/deployment.tmp.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
+    - scp scripts/deploy.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    - ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/deploy.sh && ~/scripts/deploy.sh"
+  environment:
+    name: production
+    url: http://${LB_DNS}
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+    - when: never
 
 monitor:
   stage: monitor
