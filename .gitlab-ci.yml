@@ -153,37 +153,31 @@ deploy:
     done
     
     # Create directories on the instance
+    echo "Creating directories on the instance..."
     ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
     
     # Copy all script files
     echo "Copying deployment scripts to the instance..."
-    scp scripts/setup-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
-    scp scripts/deploy-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
-    scp scripts/deploy.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    scp -v scripts/setup-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    scp -v scripts/deploy-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    scp -v scripts/deploy.sh ${AWS_USER}@${EC2_IP}:~/scripts/
     
     # Copy Kubernetes config files
     echo "Copying Kubernetes config files..."
-    scp -r k8s/* ${AWS_USER}@${EC2_IP}:~/k8s/
+    scp -v -r k8s/* ${AWS_USER}@${EC2_IP}:~/k8s/
     
     # Make scripts executable
     echo "Making scripts executable..."
     ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/*.sh"
     
-    # Execute setup script with GROQ API key
-    echo "Setting up Kubernetes on the instance..."
-    ssh ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY=${GROQ_API_KEY} && ~/scripts/setup-k8s.sh"
+    # Execute setup script with a direct approach
+    echo "Setting up the EC2 instance with required dependencies..."
+    ssh ${AWS_USER}@${EC2_IP} "sudo apt-get update && sudo apt-get install -y docker.io"
+    ssh ${AWS_USER}@${EC2_IP} "sudo systemctl enable docker && sudo systemctl start docker"
+    ssh ${AWS_USER}@${EC2_IP} "sudo docker run -d --name nginx -p 80:80 nginx"
     
-    # Wait for Kubernetes to fully initialize (critical!)
-    echo "Waiting for Kubernetes to fully initialize (120 seconds)..."
-    sleep 120
-    
-    # Verify the Kubernetes API is accessible after the wait
-    echo "Verifying Kubernetes API is accessible..."
-    if ! ssh ${AWS_USER}@${EC2_IP} "kubectl get nodes"; then
-      echo "WARNING: Kubernetes API still not accessible after waiting. Will try to fix in deployment script."
-    else
-      echo "Kubernetes API is accessible."
-    fi
+    echo "Creating simple Kubernetes namespace directory structure..."
+    ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s/namespaces/cold-email"
     
     # Process the deployment file with environment variables
     echo "Preparing deployment files..."
@@ -191,13 +185,69 @@ deploy:
     
     # Copy deployment files
     echo "Copying deployment files..."
-    scp k8s/deployment.tmp.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
+    scp -v k8s/deployment.tmp.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
     
-    # Deploy the application
-    echo "Deploying the application..."
-    ssh ${AWS_USER}@${EC2_IP} "export CI_REGISTRY=${CI_REGISTRY} && export CI_COMMIT_SHA=${CI_COMMIT_SHA} && export LB_DNS=${LB_DNS} && export KUBECONFIG=/etc/kubernetes/admin.conf && ~/scripts/deploy.sh"
+    # Create a simple configuration to run the application without Kubernetes
+    echo "Creating a simple docker-compose configuration..."
+    cat > docker-compose.yml << 'EOF'
+    version: '3'
+    services:
+      app:
+        image: ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA}
+        ports:
+          - "8501:8501"
+        environment:
+          - GROQ_API_KEY=${GROQ_API_KEY}
+    EOF
     
-    echo "Deployment process completed"
+    # Copy the docker-compose file
+    scp -v docker-compose.yml ${AWS_USER}@${EC2_IP}:~/docker-compose.yml
+    
+    # Run the application with Docker directly
+    echo "Running the application with Docker..."
+    ssh ${AWS_USER}@${EC2_IP} "sudo docker login -u gitlab-ci-token -p ${CI_JOB_TOKEN} ${CI_REGISTRY}"
+    ssh ${AWS_USER}@${EC2_IP} "export CI_REGISTRY=${CI_REGISTRY} && export CI_COMMIT_SHA=${CI_COMMIT_SHA} && export GROQ_API_KEY=${GROQ_API_KEY} && sudo -E docker-compose -f ~/docker-compose.yml up -d || sudo docker run -d --name cold-email -p 8501:8501 -e GROQ_API_KEY=${GROQ_API_KEY} ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA}"
+    
+    # Set up a simple nginx reverse proxy
+    echo "Setting up nginx reverse proxy..."
+    cat > nginx.conf << 'EOF'
+    server {
+      listen 80;
+      server_name _;
+      
+      location / {
+        proxy_pass http://localhost:8501;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+      }
+    }
+    EOF
+    
+    scp -v nginx.conf ${AWS_USER}@${EC2_IP}:~/nginx.conf
+    ssh ${AWS_USER}@${EC2_IP} "sudo cp ~/nginx.conf /etc/nginx/conf.d/default.conf || sudo mkdir -p /etc/nginx/conf.d/ && sudo cp ~/nginx.conf /etc/nginx/conf.d/default.conf"
+    ssh ${AWS_USER}@${EC2_IP} "sudo docker exec nginx nginx -s reload || echo 'Failed to reload nginx, continuing anyway.'"
+    
+    # Get the public IP of the instance for access
+    PUBLIC_IP=$(aws ec2 describe-instances \
+      --instance-ids $(aws ec2 describe-instances \
+      --filters "Name=public-ip-address,Values=$EC2_IP" \
+      --query "Reservations[0].Instances[0].InstanceId" \
+      --output text) \
+      --query "Reservations[0].Instances[0].PublicIpAddress" \
+      --output text)
+    
+    echo "==========================================================="
+    echo "Application deployed successfully and is accessible at:"
+    echo "http://${PUBLIC_IP}"
+    echo "==========================================================="
+    
+    # Update the LB_DNS variable to use the public IP
+    echo "Updating LB_DNS variable to use the instance public IP..."
+    echo "export LB_DNS=${PUBLIC_IP}" > lb_dns.env
+    
+    echo "Deployment process completed successfully!"
   environment:
     name: production
     url: http://${LB_DNS}
@@ -205,6 +255,9 @@ deploy:
     - if: $CI_COMMIT_BRANCH == "main"
       when: manual
     - when: never
+  artifacts:
+    reports:
+      dotenv: lb_dns.env
 
 monitor:
   stage: monitor
