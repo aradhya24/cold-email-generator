@@ -73,22 +73,22 @@ deploy:
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
     - chmod 600 ~/.ssh/config
-  script:
-    - aws configure set region us-east-1
-    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
-    - chmod +x scripts/get_healthy_instance.sh
-    - EC2_IP=$(./scripts/get_healthy_instance.sh)
-    - echo "Deploying to instance: $EC2_IP"
-    - ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
-    - scp -r k8s/* ${AWS_USER}@${EC2_IP}:~/k8s/
-    - scp scripts/setup-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
-    - ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/setup-k8s.sh"
-    - ssh ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY=${GROQ_API_KEY} && ~/scripts/setup-k8s.sh"
-    - envsubst < k8s/deployment.yaml > k8s/deployment.tmp.yaml
-    - scp k8s/deployment.tmp.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
-    - scp scripts/deploy.sh ${AWS_USER}@${EC2_IP}:~/scripts/
-    - ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/deploy.sh && ~/scripts/deploy.sh"
+  script: |
+    aws configure set region us-east-1
+    aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    chmod +x scripts/get_healthy_instance.sh
+    EC2_IP=$(./scripts/get_healthy_instance.sh)
+    echo "Deploying to instance: $EC2_IP"
+    ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
+    scp -r k8s/* ${AWS_USER}@${EC2_IP}:~/k8s/
+    scp scripts/setup-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/setup-k8s.sh"
+    ssh ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY=${GROQ_API_KEY} && ~/scripts/setup-k8s.sh"
+    envsubst < k8s/deployment.yaml > k8s/deployment.tmp.yaml
+    scp k8s/deployment.tmp.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
+    scp scripts/deploy.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/deploy.sh && ~/scripts/deploy.sh"
   environment:
     name: production
     url: http://${LB_DNS}
