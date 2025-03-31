@@ -67,7 +67,7 @@ deploy:
   image: python:3.9-slim
   before_script:
     - apt-get update
-    - apt-get install -y curl unzip openssh-client gettext-base
+    - apt-get install -y curl unzip openssh-client gettext-base jq
     # Install AWS CLI v2
     - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
     - unzip awscliv2.zip
@@ -85,30 +85,54 @@ deploy:
     export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
     
-    # Use a static EC2 IP for now until we can debug the script
-    if [ -n "$AWS_EC2_IP" ]; then
-      EC2_IP=$AWS_EC2_IP
-      echo "Using provided EC2 IP: $EC2_IP"
-    else
-      # Try to find an instance directly
-      echo "Finding EC2 instance with tag Name=cold-email-instance"
+    echo "Finding EC2 instance with tag Name=cold-email-instance"
+    # Find all instances with the tag Name=cold-email-instance
+    INSTANCES_JSON=$(aws ec2 describe-instances \
+      --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+      --query "Reservations[*].Instances[*].{InstanceId:InstanceId,PublicIpAddress:PublicIpAddress,LaunchTime:LaunchTime}" \
+      --output json)
+    
+    # Count instances
+    INSTANCE_COUNT=$(echo $INSTANCES_JSON | jq '.[0] | length')
+    echo "Found $INSTANCE_COUNT running instances"
+    
+    if [ "$INSTANCE_COUNT" -eq "0" ]; then
+      echo "No instances found. Launching a new one..."
+      # Make the launch script executable
+      chmod +x scripts/launch_ec2.sh
+      # Run the launch script
+      ./scripts/launch_ec2.sh
+      # Get the IP of the new instance
+      sleep 30  # Give some time for the instance to initialize
       EC2_IP=$(aws ec2 describe-instances \
         --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
         --query "Reservations[0].Instances[0].PublicIpAddress" \
         --output text)
-      
-      if [ "$EC2_IP" == "None" ] || [ -z "$EC2_IP" ]; then
-        echo "No instance found with tag. Using default EC2 IP from environment"
-        # Default to the provided IP if no instance is found
-        EC2_IP=${AWS_EC2_IP}
-      fi
+    else
+      # If we have multiple instances, use the newest one
+      echo "Selecting the most recently launched instance"
+      EC2_IP=$(echo $INSTANCES_JSON | jq -r '.[0] | sort_by(.LaunchTime) | reverse | .[0].PublicIpAddress')
     fi
     
     echo "Deploying to instance: $EC2_IP"
     
-    # Check SSH connectivity
-    echo "Testing SSH connection..."
-    ssh -o ConnectTimeout=10 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"
+    # Allow some time for SSH to be available (especially for new instances)
+    echo "Waiting for SSH to become available..."
+    for i in {1..10}; do
+      echo "Attempt $i: Testing SSH connection..."
+      if ssh -o ConnectTimeout=10 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"; then
+        echo "SSH connection established!"
+        break
+      else
+        echo "SSH connection failed. Waiting 30 seconds before retry..."
+        sleep 30
+      fi
+      
+      if [ $i -eq 10 ]; then
+        echo "Could not establish SSH connection after 10 attempts. Exiting."
+        exit 1
+      fi
+    done
     
     # Create directories on the instance
     ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
