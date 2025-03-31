@@ -9,4 +9,5 @@ spec:
   ports:
   - port: 80
     targetPort: 8501
+    name: http
   type: NodePort

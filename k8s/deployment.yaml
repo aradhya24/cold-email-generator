@@ -26,6 +26,9 @@ spec:
               key: GROQ_API_KEY
         - name: USER_AGENT
           value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        # Add load balancer DNS as environment variable
+        - name: LB_DNS
+          value: "${LB_DNS}"
         resources:
           requests:
             memory: "256Mi"

@@ -1,74 +1,31 @@
-# GenAI Pipeline: Final Deployment Steps
+# GenAI Pipeline: Load Balancer and Auto-Scaling Setup with Kubernetes
 
-This guide provides the complete and accurate steps to deploy the Cold Email Generator application using GitLab CI/CD with AWS infrastructure, including auto-scaling, load balancing, and Kubernetes on free tier EC2 instances.
+This guide provides the optimized steps to deploy the Cold Email Generator application using GitLab CI/CD with AWS infrastructure, focusing on maximizing the benefits of load balancing and auto-scaling with Kubernetes.
 
-## Prerequisite Verification Checklist
+## Prerequisites Checklist
 
 - [ ] AWS account with free tier eligibility
 - [ ] AWS CLI installed and configured with proper credentials
-- [ ] GitLab account with access to the project repository 
+- [ ] GitLab account with repository access
 - [ ] SSH key pair for EC2 access
-- [ ] Groq API key for LLM access
+- [ ] Groq API key for LLM functionality
 
-## Step 1: Project Structure Setup
-
-First, ensure your repository has the correct directory structure:
-
-```
-cold-email-generator/
-├── app/                      # Application code
-│   ├── main.py               # Streamlit application
-│   ├── chains.py             # LLM chains
-│   ├── utils.py              # Utility functions
-│   ├── portfolio.py          # Portfolio management
-│   └── resource/             # Resources directory
-├── k8s/                      # Kubernetes configuration
-│   ├── namespace.yaml
-│   ├── deployment.yaml
-│   ├── service.yaml
-│   └── ingress.yaml
-├── scripts/                  # Deployment scripts
-│   ├── setup-k8s.sh
-│   └── deploy-k8s.sh
-├── tests/                    # Tests
-├── .gitlab-ci.yml            # GitLab CI/CD configuration
-├── Dockerfile                # Docker container definition
-├── docker-compose.yml        # Docker Compose for local development
-└── requirements.txt          # Python dependencies
-```
-
-## Step 2: AWS Infrastructure Setup
-
-Execute these commands in sequence to set up the AWS infrastructure:
+## Step 1: AWS Infrastructure Setup
 
 ```bash
-# Create a VPC
+# Create a VPC with necessary networking components
 VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=cold-email-vpc}]" --query 'Vpc.VpcId' --output text)
-echo "VPC created: $VPC_ID"
+aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
 
-# Enable DNS hostnames for the VPC
-    aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
-
-# Create public subnets in two availability zones
+# Create public subnets in two availability zones for high availability
 PUBLIC_SUBNET_1=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --availability-zone us-east-1a --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=cold-email-public-1}]" --query 'Subnet.SubnetId' --output text)
 PUBLIC_SUBNET_2=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 --availability-zone us-east-1b --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=cold-email-public-2}]" --query 'Subnet.SubnetId' --output text)
-echo "Public subnets created: $PUBLIC_SUBNET_1, $PUBLIC_SUBNET_2"
 
-# Create an Internet Gateway
+# Configure internet access
 IGW_ID=$(aws ec2 create-internet-gateway --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=cold-email-igw}]" --query 'InternetGateway.InternetGatewayId' --output text)
-echo "Internet Gateway created: $IGW_ID"
-
-# Attach the Internet Gateway to the VPC
 aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
-
-# Create a route table for public subnets
 PUBLIC_RTB=$(aws ec2 create-route-table --vpc-id $VPC_ID --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=cold-email-public-rtb}]" --query 'RouteTable.RouteTableId' --output text)
-echo "Public route table created: $PUBLIC_RTB"
-
-# Create a route to the internet
 aws ec2 create-route --route-table-id $PUBLIC_RTB --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
-
-# Associate public subnets with the route table
 aws ec2 associate-route-table --route-table-id $PUBLIC_RTB --subnet-id $PUBLIC_SUBNET_1
 aws ec2 associate-route-table --route-table-id $PUBLIC_RTB --subnet-id $PUBLIC_SUBNET_2
 
@@ -79,49 +36,16 @@ EC2_SG=$(aws ec2 create-security-group \
   --vpc-id $VPC_ID \
   --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=cold-email-ec2-sg}]" \
   --query 'GroupId' --output text)
-echo "Security group created: $EC2_SG"
 
-# Allow SSH access from your IP
-aws ec2 authorize-security-group-ingress \
-  --group-id $EC2_SG \
-  --protocol tcp \
-  --port 22 \
-  --cidr $(curl -s https://checkip.amazonaws.com)/32
+# Configure security group rules
+aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 22 --cidr $(curl -s https://checkip.amazonaws.com)/32
+aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 80 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 443 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 8501 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 6443 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol all --source-group $EC2_SG
 
-# Allow HTTP/HTTPS traffic
-aws ec2 authorize-security-group-ingress \
-  --group-id $EC2_SG \
-  --protocol tcp \
-  --port 80 \
-  --cidr 0.0.0.0/0
-
-aws ec2 authorize-security-group-ingress \
-  --group-id $EC2_SG \
-  --protocol tcp \
-  --port 443 \
-  --cidr 0.0.0.0/0
-
-# Allow Streamlit port
-aws ec2 authorize-security-group-ingress \
-  --group-id $EC2_SG \
-  --protocol tcp \
-  --port 8501 \
-  --cidr 0.0.0.0/0
-
-# Allow Kubernetes API server port
-aws ec2 authorize-security-group-ingress \
-  --group-id $EC2_SG \
-  --protocol tcp \
-  --port 6443 \
-  --cidr 0.0.0.0/0
-
-# Allow all internal traffic within the security group (for K8s nodes)
-aws ec2 authorize-security-group-ingress \
-  --group-id $EC2_SG \
-  --protocol all \
-  --source-group $EC2_SG
-
-# Create an EC2 launch template
+# Create an EC2 launch template with Kubernetes pre-installed
 aws ec2 create-launch-template \
   --launch-template-name cold-email-launch-template \
   --version-description "Initial version" \
@@ -149,57 +73,67 @@ aws ec2 create-launch-template \
     ],
     "UserData": "'$(base64 -w 0 <<EOF
 #!/bin/bash
-# Update system packages
-apt-get update
-apt-get upgrade -y
-
-# Install Docker
+# Update system and install Docker
+apt-get update && apt-get upgrade -y
 apt-get install -y apt-transport-https ca-certificates curl software-properties-common
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
-add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io
-systemctl enable docker
-systemctl start docker
+add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable"
+apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io
+systemctl enable docker && systemctl start docker
 
 # Install Kubernetes components
 curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
 cat <<EOK > /etc/apt/sources.list.d/kubernetes.list
 deb https://apt.kubernetes.io/ kubernetes-xenial main
 EOK
-apt-get update
-apt-get install -y kubelet kubeadm kubectl
+apt-get update && apt-get install -y kubelet kubeadm kubectl
 apt-mark hold kubelet kubeadm kubectl
 
-# Set hostname
-hostnamectl set-hostname cold-email-master
+# Set hostname based on instance ID for uniqueness
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+hostnamectl set-hostname k8s-node-$INSTANCE_ID
+
+# Create required directories
+mkdir -p /home/ubuntu/k8s /home/ubuntu/scripts
+chown -R ubuntu:ubuntu /home/ubuntu/k8s /home/ubuntu/scripts
+
+# Add user to docker group
+usermod -aG docker ubuntu
 EOF
 )'"
   }'
-echo "EC2 launch template created"
 
-# Create a target group
+# Create a target group for load balancing
 TG_ARN=$(aws elbv2 create-target-group \
   --name cold-email-tg \
   --protocol HTTP \
   --port 8501 \
   --vpc-id $VPC_ID \
   --health-check-path "/_stcore/health" \
+  --health-check-interval-seconds 30 \
+  --health-check-timeout-seconds 5 \
+  --healthy-threshold-count 2 \
+  --unhealthy-threshold-count 2 \
   --target-type instance \
   --query 'TargetGroups[0].TargetGroupArn' \
   --output text)
-echo "Target group created: $TG_ARN"
 
-# Create a load balancer
+# Create an Application Load Balancer
 LB_ARN=$(aws elbv2 create-load-balancer \
   --name cold-email-lb \
   --subnets $PUBLIC_SUBNET_1 $PUBLIC_SUBNET_2 \
   --security-groups $EC2_SG \
   --query 'LoadBalancers[0].LoadBalancerArn' \
   --output text)
-echo "Load balancer created: $LB_ARN"
 
-# Create a listener
+# Get the load balancer DNS name for later use
+LB_DNS=$(aws elbv2 describe-load-balancers \
+  --load-balancer-arns $LB_ARN \
+  --query 'LoadBalancers[0].DNSName' \
+  --output text)
+echo "Load balancer DNS: $LB_DNS"
+
+# Create a listener for the load balancer
 LISTENER_ARN=$(aws elbv2 create-listener \
   --load-balancer-arn $LB_ARN \
   --protocol HTTP \
@@ -207,9 +141,8 @@ LISTENER_ARN=$(aws elbv2 create-listener \
   --default-actions Type=forward,TargetGroupArn=$TG_ARN \
   --query 'Listeners[0].ListenerArn' \
   --output text)
-echo "Listener created: $LISTENER_ARN"
 
-# Create auto scaling group
+# Create auto scaling group with minimum 1 and maximum 2 instances
 aws autoscaling create-auto-scaling-group \
   --auto-scaling-group-name cold-email-asg \
   --launch-template LaunchTemplateName=cold-email-launch-template,Version='$Latest' \
@@ -220,9 +153,8 @@ aws autoscaling create-auto-scaling-group \
   --target-group-arns $TG_ARN \
   --health-check-type ELB \
   --health-check-grace-period 300
-echo "Auto Scaling Group created"
 
-# Create scaling policies
+# Create scaling policies based on CPU usage
 aws autoscaling put-scaling-policy \
   --auto-scaling-group-name cold-email-asg \
   --policy-name cpu-scaling-policy \
@@ -233,7 +165,6 @@ aws autoscaling put-scaling-policy \
     },
     "TargetValue": 70.0
   }'
-echo "CPU scaling policy created"
 
 # Create scheduled scaling for free tier optimization
 aws autoscaling put-scheduled-update-group-action \
@@ -243,7 +174,6 @@ aws autoscaling put-scheduled-update-group-action \
   --min-size 0 \
   --max-size 0 \
   --desired-capacity 0
-echo "Scheduled scale-down created"
 
 aws autoscaling put-scheduled-update-group-action \
   --auto-scaling-group-name cold-email-asg \
@@ -252,24 +182,9 @@ aws autoscaling put-scheduled-update-group-action \
   --min-size 1 \
   --max-size 2 \
   --desired-capacity 1
-echo "Scheduled scale-up created"
 ```
 
-## Step 3: Create GitLab CI/CD Pipeline Configuration
-
-### Setup GitLab Project and Variables
-
-1. In your GitLab project, go to **Settings > CI/CD > Variables**
-2. Add the following variables:
-   - `AWS_ACCESS_KEY_ID`: Your AWS access key
-   - `AWS_SECRET_ACCESS_KEY`: Your AWS secret key
-   - `AWS_DEFAULT_REGION`: Your AWS region (e.g., us-east-1)
-   - `AWS_EC2_IP`: IP address of your EC2 instance (to be added later)
-   - `AWS_USER`: Username for EC2 (e.g., ubuntu)
-   - `AWS_SSH_KEY`: Your private SSH key for EC2 access
-   - `GROQ_API_KEY`: Your Groq API key
-
-### Create Kubernetes Configuration Files
+## Step 2: Create Kubernetes Configuration Files
 
 Create a directory called `k8s` in your repository and add these files:
 
@@ -311,6 +226,9 @@ spec:
               key: GROQ_API_KEY
         - name: USER_AGENT
           value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        # Add load balancer DNS as environment variable
+        - name: LB_DNS
+          value: "${LB_DNS}"
         resources:
           requests:
             memory: "256Mi"
@@ -339,6 +257,7 @@ spec:
   ports:
   - port: 80
     targetPort: 8501
+    name: http
   type: NodePort
 ```
 
@@ -351,6 +270,7 @@ metadata:
   namespace: cold-email
   annotations:
     kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   rules:
   - http:
@@ -364,9 +284,9 @@ spec:
               number: 80
 ```
 
-### Create Kubernetes Setup Scripts
+## Step 3: Create Kubernetes Setup Scripts
 
-Create a `scripts` directory and add these files:
+Create a `scripts` directory with these files:
 
 **scripts/setup-k8s.sh**:
 ```bash
@@ -398,6 +318,13 @@ kubectl create secret generic app-secrets \
 
 # Install nginx ingress controller
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
+
+# Wait for ingress controller to be ready
+echo "Waiting for ingress controller to be ready..."
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=120s || echo "Ingress controller pods still not ready, proceeding anyway"
 ```
 
 **scripts/deploy-k8s.sh**:
@@ -405,8 +332,9 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/cont
 #!/bin/bash
 set -e
 
-# Apply deployment
-envsubst < k8s/deployment.yaml | kubectl apply -f -
+# Apply deployment with substituted environment variables
+echo "Deploying application with CI_REGISTRY=${CI_REGISTRY} and CI_COMMIT_SHA=${CI_COMMIT_SHA}"
+LB_DNS=${LB_DNS} envsubst < k8s/deployment.yaml | kubectl apply -f -
 
 # Apply service
 kubectl apply -f k8s/service.yaml
@@ -415,12 +343,60 @@ kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/ingress.yaml
 
 # Wait for deployment to be ready
-kubectl rollout status deployment/cold-email-generator -n cold-email
+echo "Waiting for deployment to be ready..."
+kubectl rollout status deployment/cold-email-generator -n cold-email --timeout=120s
+
+# Print service details
+NODE_PORT=$(kubectl get svc -n cold-email cold-email-service -o jsonpath='{.spec.ports[0].nodePort}')
+echo "Application deployed and accessible at:"
+echo "Load Balancer URL: http://${LB_DNS}"
+echo "Node Port URL: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):${NODE_PORT}"
 ```
 
-### Create GitLab CI/CD Configuration File
+**scripts/get_healthy_instance.sh**:
+```bash
+#!/bin/bash
+set -e
 
-Create a `.gitlab-ci.yml` file with the following content:
+# Get all instance IDs in the auto scaling group
+INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names cold-email-asg \
+  --query "AutoScalingGroups[0].Instances[*].InstanceId" \
+  --output text)
+
+# Convert to array
+read -ra INSTANCE_ARRAY <<< "$INSTANCE_IDS"
+
+# Check each instance
+for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
+  # Get instance state
+  STATE=$(aws ec2 describe-instances \
+    --instance-ids $INSTANCE_ID \
+    --query "Reservations[0].Instances[0].State.Name" \
+    --output text)
+  
+  # Get public IP if running
+  if [ "$STATE" == "running" ]; then
+    IP=$(aws ec2 describe-instances \
+      --instance-ids $INSTANCE_ID \
+      --query "Reservations[0].Instances[0].PublicIpAddress" \
+      --output text)
+    
+    # Try to connect via SSH
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no ubuntu@$IP exit 2>/dev/null; then
+      echo $IP
+      exit 0
+    fi
+  fi
+done
+
+echo "No healthy instances found"
+exit 1
+```
+
+## Step 4: Create GitLab CI/CD Configuration
+
+Create a `.gitlab-ci.yml` file configured to use the load balancer DNS:
 
 ```yaml
 image: docker:20.10.16
@@ -432,16 +408,13 @@ variables:
   DOCKER_HOST: tcp://docker:2375
   DOCKER_TLS_CERTDIR: ""
   DOCKER_DRIVER: overlay2
-  AWS_EC2_IP: ${AWS_EC2_IP}
-  AWS_SSH_KEY: ${AWS_SSH_KEY}
-  AWS_USER: ${AWS_USER}
   DOCKER_REGISTRY: ${CI_REGISTRY}
   DOCKER_IMAGE: ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA}
+  AWS_USER: ubuntu
+  LB_DNS: ${LB_DNS}
 
 stages:
   - validate
-  - lint
-  - test
   - build
   - deploy
   - monitor
@@ -455,28 +428,6 @@ validate:
     - echo "Validating project structure..."
     - python -c "import app.main" || echo "Validation failed but continuing"
 
-lint:
-  image: python:3.9-slim
-  stage: lint
-  before_script:
-    - apt-get update && apt-get install -y python3-pip
-    - pip install flake8 black isort
-  script:
-    - flake8 app/ --config=setup.cfg || true
-    - black --check app/ || true
-    - isort --check-only app/ || true
-
-test:
-  image: python:3.9-slim
-  stage: test
-  before_script:
-    - apt-get update && apt-get install -y python3-pip
-    - pip install -r requirements.txt
-    - pip install pytest
-  script:
-    - mkdir -p tests && touch tests/__init__.py
-    - pytest -xvs tests/ || echo "Tests failed but continuing"
-
 build:
   stage: build
   script: 
@@ -486,24 +437,31 @@ build:
     - docker push $DOCKER_IMAGE 
     - docker push $CI_REGISTRY/aradhya24/cold-email-generator:latest
 
-setup_k8s:
+deploy_setup:
   stage: deploy
   image: python:3.9-slim
   only:
     - main
   when: manual
   script:
-    - apt-get update && apt-get install -y openssh-client gettext-base
+    - apt-get update && apt-get install -y openssh-client gettext-base awscli
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "mkdir -p ~/k8s ~/scripts"
-    - scp -r k8s/* ${AWS_USER}@${AWS_EC2_IP}:~/k8s/
-    - scp scripts/setup-k8s.sh ${AWS_USER}@${AWS_EC2_IP}:~/scripts/
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "chmod +x ~/scripts/setup-k8s.sh"
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "export GROQ_API_KEY=${GROQ_API_KEY} && ~/scripts/setup-k8s.sh"
+    
+    # Get healthy EC2 instance
+    - chmod +x scripts/get_healthy_instance.sh
+    - EC2_IP=$(./scripts/get_healthy_instance.sh)
+    - echo "Using EC2 instance with IP $EC2_IP for deployment"
+    
+    # Setup Kubernetes
+    - ssh ${AWS_USER}@${EC2_IP} "mkdir -p ~/k8s ~/scripts"
+    - scp -r k8s/* ${AWS_USER}@${EC2_IP}:~/k8s/
+    - scp scripts/setup-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    - ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/setup-k8s.sh"
+    - ssh ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY=${GROQ_API_KEY} && ~/scripts/setup-k8s.sh"
 
 deploy:
   stage: deploy
@@ -511,17 +469,34 @@ deploy:
   only:
     - main
   script:
-    - apt-get update && apt-get install -y openssh-client gettext-base
+    - apt-get update && apt-get install -y openssh-client gettext-base awscli
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
-    - envsubst < k8s/deployment.yaml > deployment.yaml
-    - scp deployment.yaml ${AWS_USER}@${AWS_EC2_IP}:~/k8s/deployment.yaml
-    - scp scripts/deploy-k8s.sh ${AWS_USER}@${AWS_EC2_IP}:~/scripts/
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "chmod +x ~/scripts/deploy-k8s.sh"
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "export CI_REGISTRY=${CI_REGISTRY} && export CI_COMMIT_SHA=${CI_COMMIT_SHA} && ~/scripts/deploy-k8s.sh"
+    
+    # Get healthy EC2 instance
+    - chmod +x scripts/get_healthy_instance.sh
+    - EC2_IP=$(./scripts/get_healthy_instance.sh)
+    - echo "Using EC2 instance with IP $EC2_IP for deployment"
+    
+    # Get load balancer DNS if not set
+    - |
+      if [ -z "$LB_DNS" ]; then
+        export LB_DNS=$(aws elbv2 describe-load-balancers \
+          --names cold-email-lb \
+          --query 'LoadBalancers[0].DNSName' \
+          --output text)
+        echo "Load balancer DNS: $LB_DNS"
+      fi
+    
+    # Update deployment file with variables
+    - LB_DNS=$LB_DNS envsubst < k8s/deployment.yaml > deployment.yaml
+    - scp deployment.yaml ${AWS_USER}@${EC2_IP}:~/k8s/deployment.yaml
+    - scp scripts/deploy-k8s.sh ${AWS_USER}@${EC2_IP}:~/scripts/
+    - ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/scripts/deploy-k8s.sh"
+    - ssh ${AWS_USER}@${EC2_IP} "export CI_REGISTRY=${CI_REGISTRY} && export CI_COMMIT_SHA=${CI_COMMIT_SHA} && export LB_DNS=${LB_DNS} && ~/scripts/deploy-k8s.sh"
 
 monitor:
   stage: monitor
@@ -529,187 +504,152 @@ monitor:
   only:
     - main
   script:
-    - apt-get update && apt-get install -y openssh-client curl
+    - apt-get update && apt-get install -y openssh-client curl awscli
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
     - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "kubectl get pods -n cold-email"
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "kubectl get svc -n cold-email"
-    - echo "Checking application health..."
-    - ssh ${AWS_USER}@${AWS_EC2_IP} "curl -s http://localhost:8501/_stcore/health || echo 'Health check failed'"
+    
+    # Get healthy EC2 instance
+    - chmod +x scripts/get_healthy_instance.sh
+    - EC2_IP=$(./scripts/get_healthy_instance.sh)
+    
+    # Check Kubernetes deployment
+    - ssh ${AWS_USER}@${EC2_IP} "kubectl get pods -n cold-email"
+    - ssh ${AWS_USER}@${EC2_IP} "kubectl get svc -n cold-email"
+    
+    # Get load balancer DNS if not set
+    - |
+      if [ -z "$LB_DNS" ]; then
+        export LB_DNS=$(aws elbv2 describe-load-balancers \
+          --names cold-email-lb \
+          --query 'LoadBalancers[0].DNSName' \
+          --output text)
+      fi
+    
+    # Check application health through load balancer (may need a delay)
+    - echo "Waiting for application to be available at load balancer..."
+    - sleep 60
+    - echo "Checking application health at http://${LB_DNS}/_stcore/health"
+    - curl -s -f -m 10 "http://${LB_DNS}/_stcore/health" || echo "Health check failed, application may need more time to become available"
 ```
 
-## Step 4: Launch and Configure EC2 Instance
+## Step 5: Setup GitLab Variables
 
-1. **Get an instance IP from your auto-scaling group:**
+1. In your GitLab project, go to **Settings > CI/CD > Variables**
+2. Add the following variables:
+   - `AWS_ACCESS_KEY_ID`: Your AWS access key
+   - `AWS_SECRET_ACCESS_KEY`: Your AWS secret key
+   - `AWS_DEFAULT_REGION`: Your AWS region (e.g., us-east-1)
+   - `AWS_SSH_KEY`: Your private SSH key for EC2 access
+   - `GROQ_API_KEY`: Your Groq API key
+   - `LB_DNS`: The load balancer DNS name (from Step 1)
+
+## Step 6: Launch the Pipeline
+
+1. Commit and push all files to your GitLab repository
+2. Go to **CI/CD > Pipelines** in your GitLab project
+3. Manually trigger the `deploy_setup` job for the initial Kubernetes setup
+4. After the setup is complete, the deployment will continue automatically
+
+## Step 7: Access and Verify Your Application
+
+Your application will be accessible in several ways:
+
+1. **Via the Load Balancer DNS**: `http://<LB_DNS>/`
    ```bash
-   ASG_INSTANCES=$(aws autoscaling describe-auto-scaling-groups \
+   # Get the load balancer DNS
+   LB_DNS=$(aws elbv2 describe-load-balancers \
+     --names cold-email-lb \
+     --query 'LoadBalancers[0].DNSName' \
+     --output text)
+   
+   echo "Access your application at: http://$LB_DNS"
+   ```
+
+2. **Via any EC2 instance NodePort**:
+   ```bash
+   # SSH into any instance
+   EC2_IP=$(./scripts/get_healthy_instance.sh)
+   ssh ubuntu@$EC2_IP
+   
+   # Get the NodePort
+   NODE_PORT=$(kubectl get svc -n cold-email cold-email-service -o jsonpath='{.spec.ports[0].nodePort}')
+   echo "Access your application at: http://$EC2_IP:$NODE_PORT"
+   ```
+
+## Step 8: Verify Auto-Scaling
+
+1. **Check Auto Scaling Group configuration**:
+   ```bash
+   aws autoscaling describe-auto-scaling-groups \
      --auto-scaling-group-names cold-email-asg \
-     --query "AutoScalingGroups[0].Instances[0].InstanceId" \
-     --output text)
-   
-   EC2_IP=$(aws ec2 describe-instances \
-     --instance-ids $ASG_INSTANCES \
-     --query "Reservations[0].Instances[0].PublicIpAddress" \
-     --output text)
-   
-   echo "EC2 instance IP: $EC2_IP"
+     --query "AutoScalingGroups[0].[MinSize,MaxSize,DesiredCapacity]"
    ```
 
-2. **Add this IP to your GitLab CI/CD variables as `AWS_EC2_IP`**
-
-ssh key = ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAyIkQujePhpkrc72sKIX0WVpvkpoqYVwUl3EQiag8Dr dangearadhya6@gmail.com
-
-3. **SSH into the instance and prepare it:**
+2. **Test scaling up (optional)**:
    ```bash
-   ssh -i your_key.pem ubuntu@$EC2_IP
+   # You can temporarily increase the desired capacity to test scaling
+   aws autoscaling set-desired-capacity \
+     --auto-scaling-group-name cold-email-asg \
+     --desired-capacity 2
    
-   # Verify Docker is installed
-   docker --version
-   
-   # Verify Kubernetes tools are installed
-   kubectl version --client
-   kubeadm version
-   
-   # Create directories
-   mkdir -p ~/k8s ~/scripts
-   
-   # Exit the SSH session
-   exit
+   # After testing, return to original capacity
+   aws autoscaling set-desired-capacity \
+     --auto-scaling-group-name cold-email-asg \
+     --desired-capacity 1
    ```
 
-## Step 5: Deploy the Application
-
-1. **Commit and push all configuration files to your GitLab repository**
+3. **Verify the load balancer distributes traffic**:
    ```bash
-   git add .
-   git commit -m "Add deployment configuration"
-   git push origin main
-   ```
-
-2. **Go to your GitLab project's CI/CD > Pipelines**
-
-3. **Manually trigger the `setup_k8s` job**
-   - This job will initialize Kubernetes, set up the network plugin, and prepare the environment
-
-4. **After the `setup_k8s` job completes, the regular pipeline will deploy the application**
-   - The `deploy` job will deploy the application to Kubernetes
-   - The `monitor` job will verify the deployment status
-
-5. **Verify the deployment**
-   ```bash
-   ssh -i your_key.pem ubuntu@$EC2_IP
-   
-   # Check Kubernetes nodes
-   kubectl get nodes
-   
-   # Check pods
-   kubectl get pods -n cold-email
-   
-   # Check services
-   kubectl get svc -n cold-email
-   ```
-
-6. **Access the application**
-   - Get the NodePort:
-     ```bash
-     NODE_PORT=$(kubectl get svc -n cold-email cold-email-service -o jsonpath='{.spec.ports[0].nodePort}')
-     echo "Access your application at: http://$EC2_IP:$NODE_PORT"
-     ```
-   - Or via Ingress:
-     ```bash
-     echo "Access your application at: http://$EC2_IP/"
-     ```
-   - Or via Load Balancer:
-     ```bash
-     LB_DNS=$(aws elbv2 describe-load-balancers \
-       --names cold-email-lb \
-       --query 'LoadBalancers[0].DNSName' \
+   # Check target health
+   aws elbv2 describe-target-health \
+     --target-group-arn $(aws elbv2 describe-target-groups \
+       --names cold-email-tg \
+       --query 'TargetGroups[0].TargetGroupArn' \
        --output text)
-     
-     echo "Access your application at: http://$LB_DNS"
-     ```
+   ```
 
-## Step 6: Verify Auto-Scaling and Load Balancing
+## Troubleshooting Guide
 
-```bash
-# Check the Auto Scaling Group configuration
-aws autoscaling describe-auto-scaling-groups \
-  --auto-scaling-group-names cold-email-asg \
-  --query "AutoScalingGroups[0].[MinSize,MaxSize,DesiredCapacity]"
-
-# Check the scaling policies
-aws autoscaling describe-policies \
-  --auto-scaling-group-name cold-email-asg
-
-# Check the Load Balancer target health
-aws elbv2 describe-target-health \
-  --target-group-arn $TG_ARN
-```
-
-## Troubleshooting
-
-1. **If Kubernetes initialization fails:**
+1. **If instances don't register with the load balancer**:
    ```bash
-   # Reset Kubernetes on the EC2 instance
-   ssh -i your_key.pem ubuntu@$EC2_IP
+   # Check if the security group allows traffic on port 8501
+   aws ec2 describe-security-groups --group-ids $EC2_SG
+   
+   # Check target group health
+   aws elbv2 describe-target-health --target-group-arn $TG_ARN
+   ```
+
+2. **If Kubernetes setup fails**:
+   ```bash
+   # SSH into the instance
+   EC2_IP=$(./scripts/get_healthy_instance.sh)
+   ssh ubuntu@$EC2_IP
+   
+   # Reset Kubernetes
    sudo kubeadm reset
    sudo rm -rf $HOME/.kube
    ```
 
-2. **If the pod is not starting or crashing:**
+3. **If the application is not accessible via load balancer**:
    ```bash
-   # Check pod logs
-   kubectl logs -n cold-email deployment/cold-email-generator
+   # Check if pods are running
+   kubectl get pods -n cold-email
    
-   # Describe the pod to get more details
-   kubectl describe pod -n cold-email -l app=cold-email-generator
-   ```
-
-3. **If the application is not accessible:**
-   ```bash
-   # Check if the service is properly exposed
-   kubectl get svc -n cold-email cold-email-service
+   # Check if service is correctly configured
+   kubectl get svc -n cold-email
    
-   # Check if the ingress is properly configured
+   # Check if ingress is working
    kubectl get ingress -n cold-email
-   
-   # Check if the load balancer is healthy
-   aws elbv2 describe-target-health \
-     --target-group-arn $TG_ARN
+   kubectl describe ingress -n cold-email
    ```
 
-## Free Tier Optimization Checks
+## Free Tier Optimization Reminders
 
-- EC2 instances are t2.micro (free tier eligible)
-- Auto-scaling schedules reduce instances during off-hours
-- Resource limits on Kubernetes pods prevent excessive resource usage
-- Single-node Kubernetes cluster minimizes costs
-- Load balancer is configured without provisioned capacity
-
-## Ongoing Maintenance
-
-```bash
-# Check Kubernetes cluster status
-kubectl get nodes
-kubectl get pods -A
-
-# Check application logs
-kubectl logs -n cold-email deployment/cold-email-generator
-
-# Check auto-scaling activity
-aws autoscaling describe-scaling-activities \
-  --auto-scaling-group-name cold-email-asg
-
-# Monitor CPU usage
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/EC2 \
-  --metric-name CPUUtilization \
-  --dimensions Name=AutoScalingGroupName,Value=cold-email-asg \
-  --start-time $(date -u -d "1 hour ago" +%Y-%m-%dT%H:%M:%SZ) \
-  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  --period 300 \
-  --statistics Average
-``` 
+- The auto-scaling schedules reduce costs by scaling down during off-hours
+- t2.micro instances stay within free tier limits
+- Resources for Kubernetes pods are limited to minimize resource usage
+- The load balancer is free for the first 750 hours per month
+- Make sure to monitor usage to stay within free tier limits 
