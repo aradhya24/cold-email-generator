@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cold-email-generator
+  namespace: cold-email
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cold-email-generator
+  template:
+    metadata:
+      labels:
+        app: cold-email-generator
+    spec:
+      containers:
+      - name: app
+        image: ${CI_REGISTRY}/aradhya24/cold-email-generator:${CI_COMMIT_SHA}
+        ports:
+        - containerPort: 8501
+        env:
+        - name: GROQ_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: GROQ_API_KEY
+        - name: USER_AGENT
+          value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 10
+          periodSeconds: 5

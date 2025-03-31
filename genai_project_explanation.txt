@@ -1,0 +1,70 @@
+# GenAI Ops Pipeline Project Explanation
+
+## Project Overview
+This project implements a Generative AI operations pipeline for a cold email generator application. The system uses a Streamlit web application that leverages Groq's large language models to generate personalized cold emails based on company information and job listings.
+
+## Architecture Components
+
+### 1. GitLab CI/CD Pipeline
+- **Source Control**: Centralized code repository with version control
+- **CI/CD Pipeline**: Multi-stage pipeline for validation, testing, building and deployment
+- **Container Registry**: Storage for Docker images built during the CI process
+- **Automated Testing**: Includes linting, security scanning, unit tests, and performance tests
+- **Notification System**: Alerts team members about deployment status
+
+### 2. AWS Infrastructure (Optimized for Free Tier)
+- **VPC Setup**: Virtual Private Cloud with public and private subnets across availability zones
+- **EC2 Instances**: t2.micro instances within free tier limits (750 hours/month)
+- **Auto-scaling**: Dynamic adjustment of capacity based on demand
+- **Load Balancing**: Distribution of traffic across multiple instances 
+- **Security Groups**: Network access control for infrastructure components
+
+### 3. Kubernetes Deployment (Self-managed)
+- **Kubernetes Cluster**: Self-managed on EC2 instead of using EKS for cost savings
+- **Master Node**: Controls the Kubernetes cluster operations
+- **Worker Nodes**: Host application pods
+- **Deployments**: Manage pod lifecycle and scaling
+- **Services**: Enable networking between components
+
+### 4. Cold Email Generator Application
+- **Streamlit Web Interface**: User-friendly frontend for the application
+- **Groq API Integration**: Connection to Groq's LLM for email generation
+- **Vector Database**: Stores and retrieves relevant content based on job descriptions
+- **Job Scraping Functionality**: Extracts job listings from company career pages
+- **Email Customization**: Personalizes emails with relevant portfolio links
+
+## Data Flow
+1. Users access the application through the load balancer
+2. Application scrapes job listings from company career pages
+3. Job descriptions are processed and matched with relevant portfolio items
+4. Groq's LLM generates personalized cold emails
+5. Generated emails are presented to the user
+
+## Deployment Process
+1. Developers push changes to GitLab
+2. GitLab CI/CD pipeline validates, tests, and builds the application
+3. Docker images are pushed to the container registry
+4. Deployment stage connects to EC2 instances via SSH
+5. Kubernetes deployments are updated with the new version
+6. Auto-scaling ensures optimal resource usage
+
+## Cost Optimization Strategies
+1. Using t2.micro EC2 instances within free tier limits
+2. Self-managed Kubernetes to avoid EKS costs
+3. Scheduled scaling to shut down instances during off-hours
+4. Basic monitoring instead of detailed monitoring
+5. Proper resource allocation to minimize waste
+
+## Security Measures
+1. VPC with proper subnet isolation
+2. Security groups restricting network access
+3. Regular security scanning in CI/CD pipeline
+4. Secure API key management
+5. SSH key-based authentication
+
+## Monitoring and Maintenance
+1. Health checks for application components
+2. Performance testing during deployment
+3. JSON file logging with retention policies
+4. Notification system for deployment status
+5. Budget alerts to prevent exceeding free tier limits 
