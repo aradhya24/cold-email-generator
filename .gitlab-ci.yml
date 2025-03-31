@@ -65,24 +65,24 @@ deploy_setup:
 deploy:
   stage: deploy
   image: python:3.9-slim
-  before_script:
-    - apt-get update
-    - apt-get install -y curl unzip openssh-client gettext-base jq
+  before_script: |
+    apt-get update
+    apt-get install -y curl unzip openssh-client gettext-base jq
     # Install AWS CLI v2
-    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-    - unzip awscliv2.zip
-    - ./aws/install
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    unzip awscliv2.zip
+    ./aws/install
     # Setup SSH
-    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
-    - echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
-    - chmod 600 ~/.ssh/id_rsa
-    - eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
-    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
-    - chmod 600 ~/.ssh/config
+    mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    chmod 600 ~/.ssh/id_rsa
+    eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
+    echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    chmod 600 ~/.ssh/config
     # Print public key for debugging
-    - echo "### SSH public key being used (add this to authorized_keys on EC2): ###"
-    - ssh-keygen -y -f ~/.ssh/id_rsa
-    - echo "###################################################################"
+    echo "### SSH public key being used (add this to authorized_keys on EC2): ###"
+    ssh-keygen -y -f ~/.ssh/id_rsa
+    echo "###################################################################"
   script: |
     # Configure AWS credentials
     export AWS_DEFAULT_REGION=us-east-1
