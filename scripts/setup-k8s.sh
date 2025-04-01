@@ -47,6 +47,10 @@ echo "Cleaning up any existing Kubernetes repository configurations..."
 sudo rm -f /etc/apt/sources.list.d/kubernetes.list /etc/apt/sources.list.d/kubectl.list /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 sudo apt-key del BA07F4FB 2>/dev/null || true
 
+# Remove any references to kubernetes-xenial
+sudo sed -i '/kubernetes-xenial/d' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+sudo rm -f /etc/apt/sources.list.d/kubernetes-xenial.list 2>/dev/null || true
+
 # Set up repository properly
 sudo mkdir -p /etc/apt/keyrings
 curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
