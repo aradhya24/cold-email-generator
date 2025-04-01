@@ -70,6 +70,12 @@ deploy:
     - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
     - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
     - aws configure set default.region us-east-1
+    
+    # Debug AWS configuration
+    - echo "Verifying AWS configuration:"
+    - aws configure list
+    - echo "Testing AWS connection:"
+    - aws ec2 describe-regions --output text | head -1 || echo "AWS connection failed"
   script:
     - |
       # Launch EC2 instance and get instance info
@@ -95,6 +101,7 @@ deploy:
       fi
       
       INSTANCE_ID=$(aws ec2 run-instances \
+        --region us-east-1 \
         --image-id ami-0c7217cdde317cfec \
         --instance-type t2.micro \
         --key-name $EC2_KEY_NAME \
@@ -108,12 +115,13 @@ deploy:
       
       # Wait for instance to be running
       echo "Waiting for instance to be running..."
-      aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+      aws ec2 wait instance-running --region us-east-1 --instance-ids $INSTANCE_ID
       
       # Get public IP with retries
       echo "Getting instance public IP..."
       for i in {1..5}; do
         PUBLIC_IP=$(aws ec2 describe-instances \
+          --region us-east-1 \
           --instance-ids $INSTANCE_ID \
           --query 'Reservations[0].Instances[0].PublicIpAddress' \
           --output text)
@@ -204,9 +212,16 @@ monitor:
     export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
     
+    # Debug AWS configuration
+    echo "Verifying AWS configuration:"
+    aws configure list
+    echo "Testing AWS connection:"
+    aws ec2 describe-regions --output text | head -1 || echo "AWS connection failed"
+    
     # Get instance IP with better error handling
     echo "Searching for EC2 instance..."
     INSTANCE_INFO=$(aws ec2 describe-instances \
+      --region us-east-1 \
       --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
       --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
       --output text)
