@@ -268,85 +268,115 @@ deploy:
 
 monitor:
   stage: monitor
-  image: python:3.9-slim
-  script: |
-    # Install required packages and setup in parallel
-    apt-get update && apt-get install -y openssh-client python3-pip &
-    pip install awscli &
-    mkdir -p ~/.ssh && chmod 700 ~/.ssh &
-    wait
+  image: ubuntu:22.04
+  before_script:
+    # Install required packages
+    - apt-get update && apt-get install -y openssh-client python3-pip curl
+    - pip install awscli
     
-    # Generate a new SSH key for this pipeline run
-    echo "Generating new SSH key..."
-    ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
-    chmod 600 ~/.ssh/ec2_key
-    ssh-add ~/.ssh/ec2_key
-    cat ~/.ssh/ec2_key.pub > ec2_key.pub
+    # Setup SSH directory and permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
     
-    # Set up SSH config
-    echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+    # Start SSH agent and ensure it's running
+    - eval $(ssh-agent -s)
+    - echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
+    - echo "SSH_AGENT_PID=$SSH_AGENT_PID"
     
-    # Setup AWS credentials
-    export AWS_DEFAULT_REGION=us-east-1
-    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
-    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    # Generate and configure SSH key
+    - ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
+    - chmod 600 ~/.ssh/ec2_key
+    - ssh-add ~/.ssh/ec2_key
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n\tServerAliveInterval 30\n\tServerAliveCountMax 3\n" > ~/.ssh/config
+    - chmod 600 ~/.ssh/config
     
-    # Debug AWS configuration
-    echo "Verifying AWS configuration:"
-    aws configure list
-    echo "Testing AWS connection:"
-    aws ec2 describe-regions --region us-east-1 --output text | head -1 || echo "AWS connection failed"
+    # Configure AWS credentials
+    - export AWS_DEFAULT_REGION=us-east-1
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set region us-east-1
+    - aws configure set output json
+  script:
+    # Verify AWS configuration
+    - aws configure list
+    - aws ec2 describe-regions --region us-east-1 --output text | head -1
     
-    # Get information about all EC2 instances
-    echo "Listing all EC2 instances for troubleshooting:"
-    aws ec2 describe-instances --region us-east-1 --query "Reservations[*].Instances[*].[InstanceId,State.Name,Tags[?Key=='Name'].Value|[0],PublicIpAddress]" --output text
-    
-    # Get instance IP with better error handling
-    echo "Searching for EC2 instance..."
-    INSTANCE_INFO=$(aws ec2 describe-instances \
-      --region us-east-1 \
-      --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
-      --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
-      --output text)
-    
-    EC2_IP=$(echo "$INSTANCE_INFO" | awk '{print $2}')
-    
-    if [ -z "$EC2_IP" ]; then
-      echo "Failed to get EC2 instance IP. Instance info:"
-      echo "$INSTANCE_INFO"
-      exit 1
-    fi
-    
-    echo "Found EC2 instance with IP: $EC2_IP"
-    
-    # Define SSH command function with retries
-    run_ssh_command() {
-      local command="$1"
-      for i in {1..3}; do
-        echo "Attempt $i: Running command via SSH..."
-        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -i ~/.ssh/ec2_key ${AWS_USER}@${EC2_IP} "$command"; then
-          echo "Command executed successfully!"
-          return 0
+    # Get EC2 instance information with improved error handling
+    - |
+      MAX_RETRIES=5
+      RETRY_DELAY=15
+      
+      for i in $(seq 1 $MAX_RETRIES); do
+        echo "Attempt $i to get EC2 instance info..."
+        
+        INSTANCE_INFO=$(aws ec2 describe-instances \
+          --region us-east-1 \
+          --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+          --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
+          --output text)
+        
+        EC2_IP=$(echo "$INSTANCE_INFO" | awk '{print $2}')
+        
+        if [ ! -z "$EC2_IP" ] && [ "$EC2_IP" != "None" ] && [ "$EC2_IP" != "null" ]; then
+          echo "Found EC2 instance with IP: $EC2_IP"
+          break
         fi
-        echo "Command failed. Waiting 10 seconds before retry..."
-        sleep 10
+        
+        if [ $i -eq $MAX_RETRIES ]; then
+          echo "Failed to get EC2 instance IP after $MAX_RETRIES attempts. Instance info:"
+          echo "$INSTANCE_INFO"
+          exit 1
+        fi
+        
+        echo "No valid IP found, waiting $RETRY_DELAY seconds before retry..."
+        sleep $RETRY_DELAY
       done
-      echo "Failed to execute command after 3 attempts."
-      return 1
-    }
-    
-    # Run health checks in parallel
-    run_ssh_command "kubectl get pods -n cold-email" &
-    run_ssh_command "kubectl get svc -n cold-email" &
-    wait
-    
-    # Check application health
-    sleep 15
-    curl -s -f -m 5 "http://${EC2_IP}/_stcore/health" || echo "Health check failed"
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-      when: always
+      
+      # Create lb_dns.env file with proper permissions
+      echo "Creating lb_dns.env file..."
+      echo "LB_DNS=$EC2_IP" > lb_dns.env
+      chmod 600 lb_dns.env
+      
+      # Function to run SSH commands with retries
+      run_ssh_command() {
+        local command="$1"
+        local max_attempts=3
+        local wait_time=10
+        
+        for attempt in $(seq 1 $max_attempts); do
+          echo "Attempt $attempt: Running command via SSH..."
+          if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=10 ubuntu@${EC2_IP} "$command"; then
+            echo "Command executed successfully!"
+            return 0
+          fi
+          if [ $attempt -lt $max_attempts ]; then
+            echo "Command failed. Waiting $wait_time seconds before retry..."
+            sleep $wait_time
+          fi
+        done
+        echo "Failed to execute command after $max_attempts attempts."
+        return 1
+      }
+      
+      # Check Kubernetes cluster status
+      echo "Checking Kubernetes cluster status..."
+      run_ssh_command "sudo kubectl get nodes --no-headers" || exit 1
+      run_ssh_command "sudo kubectl get pods --all-namespaces" || exit 1
+      
+      # Verify application deployment
+      echo "Verifying application deployment..."
+      run_ssh_command "sudo kubectl get pods -n default -l app=cold-email-generator -o wide" || exit 1
+      
+      # Check service status
+      echo "Checking service status..."
+      run_ssh_command "sudo kubectl get svc -n default" || exit 1
+      
+      echo "Monitor stage completed successfully!"
   artifacts:
     reports:
       dotenv: lb_dns.env
+    paths:
+      - lb_dns.env
     expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
