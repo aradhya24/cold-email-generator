@@ -74,6 +74,26 @@ deploy:
     - |
       # Launch EC2 instance and get instance info
       echo "Launching EC2 instance..."
+      
+      # Check if required AWS variables are set
+      if [ -z "$EC2_KEY_NAME" ]; then
+        echo "ERROR: EC2_KEY_NAME is not set. Please add this variable in GitLab CI/CD settings."
+        echo "Example value: my-key-pair"
+        exit 1
+      fi
+      
+      if [ -z "$EC2_SECURITY_GROUP" ]; then
+        echo "ERROR: EC2_SECURITY_GROUP is not set. Please add this variable in GitLab CI/CD settings."
+        echo "Example value: sg-0123456789abcdef"
+        exit 1
+      fi
+      
+      if [ -z "$EC2_SUBNET_ID" ]; then
+        echo "ERROR: EC2_SUBNET_ID is not set. Please add this variable in GitLab CI/CD settings."
+        echo "Example value: subnet-0123456789abcdef"
+        exit 1
+      fi
+      
       INSTANCE_ID=$(aws ec2 run-instances \
         --image-id ami-0c7217cdde317cfec \
         --instance-type t2.micro \
