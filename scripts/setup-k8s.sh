@@ -14,7 +14,15 @@ fi
 echo "Installing Kubernetes components..."
 sudo apt-get update
 sudo apt-get install -y apt-transport-https ca-certificates curl
-# Set up repository properly with fallback methods
+
+# Clean up any existing Kubernetes repository configurations
+echo "Cleaning up any existing Kubernetes repository configurations..."
+sudo rm -f /etc/apt/sources.list.d/kubernetes.list
+sudo rm -f /etc/apt/sources.list.d/kubectl.list
+sudo rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+sudo apt-key del BA07F4FB 2>/dev/null || true  # Old Google Cloud key
+
+# Set up repository properly
 if [ ! -d "/etc/apt/keyrings" ]; then
     sudo mkdir -p /etc/apt/keyrings
 fi
@@ -23,6 +31,14 @@ curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --
 # Add the Kubernetes repository
 echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
+# Check for any other references to kubernetes-xenial in all apt sources
+echo "Checking for other Kubernetes repository references..."
+grep -r "kubernetes-xenial" /etc/apt/ 2>/dev/null || true
+
+# Clean apt cache and update
+echo "Cleaning apt cache and updating..."
+sudo apt-get clean
+sudo rm -rf /var/lib/apt/lists/*
 sudo apt-get update || (echo "Failed to update apt, retrying with different method" && \
     sudo apt-get update --fix-missing)
 sudo apt-get install -y kubelet kubeadm kubectl || \
