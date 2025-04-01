@@ -75,30 +75,71 @@ fi
 # Apply deployment with substituted environment variables
 echo "Deploying application with CI_REGISTRY=${CI_REGISTRY} and CI_COMMIT_SHA=${CI_COMMIT_SHA}"
 
+# Set the correct manifest directory
+MANIFEST_DIR="/opt/cold-email/k8s"
+
 # Check if deployment file exists and show its content for debugging
 echo "Checking deployment file..."
-if [ -f ~/k8s/deployment.yaml ]; then
-  echo "Found deployment file at ~/k8s/deployment.yaml"
+if [ -f "${MANIFEST_DIR}/deployment.yaml" ]; then
+  echo "Found deployment file at ${MANIFEST_DIR}/deployment.yaml"
   echo "First 10 lines of deployment file:"
-  head -n 10 ~/k8s/deployment.yaml
+  head -n 10 "${MANIFEST_DIR}/deployment.yaml"
 else
-  echo "Warning: deployment.yaml not found at ~/k8s/deployment.yaml"
+  echo "Warning: deployment.yaml not found at ${MANIFEST_DIR}/deployment.yaml"
   echo "Current directory: $(pwd)"
-  echo "Files in ~/k8s/:"
-  ls -la ~/k8s/ || echo "Directory doesn't exist or can't be accessed"
+  echo "Files in ${MANIFEST_DIR}:"
+  ls -la "${MANIFEST_DIR}" || echo "Directory doesn't exist or can't be accessed"
+  
+  # Create default deployment if file doesn't exist
+  echo "Creating default deployment..."
+  cat <<EOF > "${MANIFEST_DIR}/deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cold-email-generator
+  namespace: cold-email
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cold-email-generator
+  template:
+    metadata:
+      labels:
+        app: cold-email-generator
+    spec:
+      containers:
+      - name: cold-email-generator
+        image: ${CI_REGISTRY:-docker.io/library}/cold-email-generator:${CI_COMMIT_SHA:-latest}
+        ports:
+        - containerPort: 8501
+        env:
+        - name: GROQ_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: GROQ_API_KEY
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+EOF
 fi
 
 # Apply deployment
 echo "Applying deployment..."
-kubectl apply -f ~/k8s/deployment.yaml || {
+kubectl apply -f "${MANIFEST_DIR}/deployment.yaml" || {
   echo "Error applying deployment. Retrying with --validate=false..."
-  kubectl apply -f ~/k8s/deployment.yaml --validate=false
+  kubectl apply -f "${MANIFEST_DIR}/deployment.yaml" --validate=false
 }
 
 # Apply service
 echo "Applying service configuration..."
-if [ -f ~/k8s/service.yaml ]; then
-  kubectl apply -f ~/k8s/service.yaml
+if [ -f "${MANIFEST_DIR}/service.yaml" ]; then
+  kubectl apply -f "${MANIFEST_DIR}/service.yaml"
 else
   echo "Warning: service.yaml not found. Creating default service..."
   cat <<EOF | kubectl apply -f -
@@ -119,8 +160,8 @@ fi
 
 # Apply ingress
 echo "Applying ingress configuration..."
-if [ -f ~/k8s/ingress.yaml ]; then
-  kubectl apply -f ~/k8s/ingress.yaml
+if [ -f "${MANIFEST_DIR}/ingress.yaml" ]; then
+  kubectl apply -f "${MANIFEST_DIR}/ingress.yaml"
 else
   echo "Warning: ingress.yaml not found. Creating default ingress..."
   cat <<EOF | kubectl apply -f -
