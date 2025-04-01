@@ -115,8 +115,11 @@ jobs:
             exit 1
           fi
           
+          # Store SSH public key in a variable
+          SSH_PUBLIC_KEY=$(cat ~/.ssh/ec2_key.pub)
+          
           # Create user data script with proper debugging
-          cat > userdata.sh << 'EOF'
+          cat > userdata.sh << EOF
           #!/bin/bash
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
           echo "Starting user data script execution..."
@@ -128,19 +131,26 @@ jobs:
           
           # Add SSH key to authorized_keys
           echo "Adding SSH key to authorized_keys..."
-          cat > /home/ubuntu/.ssh/authorized_keys << 'EOT'
-          $(cat ~/.ssh/ec2_key.pub)
-          EOT
+          echo "${SSH_PUBLIC_KEY}" > /home/ubuntu/.ssh/authorized_keys
           
           # Set proper permissions
           echo "Setting proper permissions..."
           chmod 600 /home/ubuntu/.ssh/authorized_keys
           chown -R ubuntu:ubuntu /home/ubuntu/.ssh
           
+          # Update package lists
+          echo "Updating package lists..."
+          apt-get update
+          
           # Install required packages
           echo "Installing required packages..."
-          apt-get update
-          apt-get install -y python3-pip docker.io
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            python3-pip \
+            docker.io \
+            curl \
+            apt-transport-https \
+            ca-certificates \
+            software-properties-common
           
           # Start and enable Docker
           echo "Starting Docker service..."
@@ -148,7 +158,12 @@ jobs:
           systemctl enable docker
           usermod -aG docker ubuntu
           
-          echo "User data script completed."
+          # Verify Docker installation
+          echo "Verifying Docker installation..."
+          docker --version
+          systemctl status docker --no-pager
+          
+          echo "User data script completed successfully."
           EOF
           
           chmod +x userdata.sh
@@ -157,7 +172,6 @@ jobs:
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ami-0c7217cdde317cfec \
             --instance-type t2.micro \
-            --key-name aws-key \
             --security-group-ids ${{ secrets.EC2_SECURITY_GROUP }} \
             --subnet-id ${{ secrets.EC2_SUBNET_ID }} \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-instance}]" \
@@ -166,13 +180,18 @@ jobs:
             --query 'Instances[0].InstanceId' \
             --output text)
             
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "Failed to launch EC2 instance"
+            exit 1
+          fi
+          
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
           
           echo "Waiting for instance to be running..."
           aws ec2 wait instance-running --instance-ids $INSTANCE_ID
           
           echo "Waiting additional time for instance setup..."
-          sleep 60
+          sleep 90  # Increased wait time to ensure user data script completes
           
           # Get public IP with retries
           MAX_RETRIES=5
@@ -184,6 +203,7 @@ jobs:
               --output text)
               
             if [ ! -z "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "None" ] && [ "$PUBLIC_IP" != "null" ]; then
+              echo "Found public IP: $PUBLIC_IP"
               echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
               echo "LB_DNS=$PUBLIC_IP" >> $GITHUB_ENV
               break
@@ -199,19 +219,27 @@ jobs:
             sleep 20
           done
           
+          # Test SSH connection with improved debugging
           echo "Testing SSH connection..."
           for i in {1..6}; do
-            if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=10 ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"; then
-              echo "SSH connection established"
+            echo "SSH attempt $i: Trying to connect to ubuntu@$PUBLIC_IP..."
+            if ssh -v -i ~/.ssh/ec2_key -o ConnectTimeout=10 -o BatchMode=yes ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"; then
+              echo "SSH connection established successfully"
               break
             fi
-            echo "Attempt $i: SSH not ready, waiting 20 seconds..."
-            sleep 20
+            echo "Attempt $i failed. Checking instance status..."
+            aws ec2 describe-instance-status --instance-ids $INSTANCE_ID
+            
             if [ $i -eq 6 ]; then
-              echo "Failed to establish SSH connection"
+              echo "Failed to establish SSH connection after all attempts"
+              echo "Fetching instance console output for debugging..."
+              aws ec2 get-console-output --instance-id $INSTANCE_ID
               aws ec2 terminate-instances --instance-ids $INSTANCE_ID
               exit 1
             fi
+            
+            echo "Waiting 20 seconds before next attempt..."
+            sleep 20
           done
           
       - name: Wait for SSH and Deploy
