@@ -183,24 +183,47 @@ deploy:
         fi
       done
       
-      # Create necessary directories
-      echo "Creating directories..."
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo mkdir -p /opt/cold-email/{app,scripts,k8s}"
+      # Create necessary directories and set permissions
+      echo "Creating directories and setting permissions..."
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo mkdir -p /opt/cold-email/{app,scripts,k8s} && sudo chown -R ubuntu:ubuntu /opt/cold-email"
       
-      # Copy files in parallel
+      # Copy files in parallel with proper error handling
       echo "Copying files..."
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r app/* ubuntu@$PUBLIC_IP:/opt/cold-email/app/ &
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r scripts/* ubuntu@$PUBLIC_IP:/opt/cold-email/scripts/ &
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r k8s/* ubuntu@$PUBLIC_IP:/opt/cold-email/k8s/ &
+      copy_with_retries() {
+        local src="$1"
+        local dest="$2"
+        local retries=3
+        for i in $(seq 1 $retries); do
+          if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r "$src" "ubuntu@$PUBLIC_IP:$dest"; then
+            return 0
+          fi
+          echo "Attempt $i: Failed to copy $src, retrying in 5 seconds..."
+          sleep 5
+        done
+        echo "Failed to copy $src after $retries attempts"
+        return 1
+      }
+
+      # Copy each directory with retries
+      copy_with_retries "app/*" "/opt/cold-email/app/" &
+      copy_with_retries "scripts/*" "/opt/cold-email/scripts/" &
+      copy_with_retries "k8s/*" "/opt/cold-email/k8s/" &
       wait
+      
+      # Verify files were copied
+      echo "Verifying file copy..."
+      if ! ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "ls -la /opt/cold-email/{app,scripts,k8s}"; then
+        echo "Failed to verify copied files"
+        exit 1
+      fi
       
       # Create and copy configuration files
       echo "Creating configuration files..."
-      echo "GROQ_API_KEY=$GROQ_API_KEY" | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo tee /opt/cold-email/app/.env"
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "echo 'GROQ_API_KEY=$GROQ_API_KEY' | sudo tee /opt/cold-email/app/.env && sudo chown ubuntu:ubuntu /opt/cold-email/app/.env"
       
       # Make scripts executable
       echo "Making scripts executable..."
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo chmod +x /opt/cold-email/scripts/*.sh"
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "chmod +x /opt/cold-email/scripts/*.sh || echo 'Failed to make scripts executable'"
       
       # Run setup script
       echo "Running setup script..."
