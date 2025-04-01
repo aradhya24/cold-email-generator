@@ -79,19 +79,21 @@ jobs:
       - name: Set up SSH
         id: ssh_key
         run: |
-          mkdir -p ~/.ssh
+          mkdir -p ~/.ssh ssh_keys
           chmod 700 ~/.ssh
           echo "Generating new SSH key..."
           ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
           chmod 600 ~/.ssh/ec2_key
           eval $(ssh-agent -s)
           ssh-add ~/.ssh/ec2_key
-          cat ~/.ssh/ec2_key.pub > ec2_key.pub
-          echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+          
           # Save SSH keys for monitor stage
-          mkdir -p ssh_keys
           cp ~/.ssh/ec2_key ssh_keys/
           cp ~/.ssh/ec2_key.pub ssh_keys/
+          
+          # Create SSH config
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+          chmod 600 ~/.ssh/config
           
       - name: Upload SSH keys
         uses: actions/upload-artifact@v4
@@ -113,35 +115,69 @@ jobs:
             exit 1
           fi
           
-          # Create user data script
-          echo "#!/bin/bash" > userdata.sh
-          echo "mkdir -p /home/ubuntu/.ssh" >> userdata.sh
-          cat ec2_key.pub > pubkey.txt
-          echo "cat > /home/ubuntu/.ssh/authorized_keys << 'EOT'" >> userdata.sh
-          cat pubkey.txt >> userdata.sh
-          echo "EOT" >> userdata.sh
-          echo "chmod 700 /home/ubuntu/.ssh" >> userdata.sh
-          echo "chmod 600 /home/ubuntu/.ssh/authorized_keys" >> userdata.sh
-          echo "chown -R ubuntu:ubuntu /home/ubuntu/.ssh" >> userdata.sh
+          # Create user data script with proper debugging
+          cat > userdata.sh << 'EOF'
+          #!/bin/bash
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          echo "Starting user data script execution..."
           
-          # Launch EC2 instance
+          # Create ubuntu user SSH directory with proper permissions
+          echo "Setting up SSH directory..."
+          mkdir -p /home/ubuntu/.ssh
+          chmod 700 /home/ubuntu/.ssh
+          
+          # Add SSH key to authorized_keys
+          echo "Adding SSH key to authorized_keys..."
+          cat > /home/ubuntu/.ssh/authorized_keys << 'EOT'
+          $(cat ~/.ssh/ec2_key.pub)
+          EOT
+          
+          # Set proper permissions
+          echo "Setting proper permissions..."
+          chmod 600 /home/ubuntu/.ssh/authorized_keys
+          chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+          
+          # Install required packages
+          echo "Installing required packages..."
+          apt-get update
+          apt-get install -y python3-pip docker.io
+          
+          # Start and enable Docker
+          echo "Starting Docker service..."
+          systemctl start docker
+          systemctl enable docker
+          usermod -aG docker ubuntu
+          
+          echo "User data script completed."
+          EOF
+          
+          chmod +x userdata.sh
+          
+          echo "Launching EC2 instance..."
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ami-0c7217cdde317cfec \
             --instance-type t2.micro \
-            --network-interfaces "AssociatePublicIpAddress=true,DeviceIndex=0,Groups=${{ secrets.EC2_SECURITY_GROUP }},SubnetId=${{ secrets.EC2_SUBNET_ID }}" \
+            --key-name aws-key \
+            --security-group-ids ${{ secrets.EC2_SECURITY_GROUP }} \
+            --subnet-id ${{ secrets.EC2_SUBNET_ID }} \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-instance}]" \
             --user-data file://userdata.sh \
+            --associate-public-ip-address \
             --query 'Instances[0].InstanceId' \
             --output text)
             
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
           
-          # Wait for instance to be running
+          echo "Waiting for instance to be running..."
           aws ec2 wait instance-running --instance-ids $INSTANCE_ID
-          sleep 30
           
-          # Get public IP
-          for i in {1..5}; do
+          echo "Waiting additional time for instance setup..."
+          sleep 60
+          
+          # Get public IP with retries
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i to get public IP..."
             PUBLIC_IP=$(aws ec2 describe-instances \
               --instance-ids $INSTANCE_ID \
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
@@ -153,21 +189,19 @@ jobs:
               break
             fi
             
-            echo "Attempt $i: No public IP yet, waiting 20 seconds..."
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Failed to get public IP after $MAX_RETRIES attempts"
+              aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+              exit 1
+            fi
+            
+            echo "Waiting 20 seconds before retry..."
             sleep 20
           done
           
-          if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ] || [ "$PUBLIC_IP" = "null" ]; then
-            echo "Failed to get public IP"
-            aws ec2 terminate-instances --instance-ids $INSTANCE_ID
-            exit 1
-          fi
-          
-      - name: Wait for SSH and Deploy
-        run: |
-          # Wait for SSH
+          echo "Testing SSH connection..."
           for i in {1..6}; do
-            if ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "echo 'SSH connection successful'"; then
+            if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=10 ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"; then
               echo "SSH connection established"
               break
             fi
@@ -175,11 +209,13 @@ jobs:
             sleep 20
             if [ $i -eq 6 ]; then
               echo "Failed to establish SSH connection"
-              aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_ID }}
+              aws ec2 terminate-instances --instance-ids $INSTANCE_ID
               exit 1
             fi
           done
           
+      - name: Wait for SSH and Deploy
+        run: |
           # Setup directories
           ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "sudo mkdir -p /opt/cold-email/{app,scripts,k8s} && sudo chown -R ubuntu:ubuntu /opt/cold-email"
           
