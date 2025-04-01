@@ -81,7 +81,7 @@ deploy:
     - aws ec2 describe-regions --region us-east-1 --output text | head -1 || echo "AWS connection failed"
   script:
     - |
-      # Launch EC2 instance and get instance info
+      # Launch EC2 instance with explicit network interface to ensure public IP
       echo "Launching EC2 instance..."
       
       # Check if required AWS variables are set
@@ -108,8 +108,7 @@ deploy:
         --image-id ami-0c7217cdde317cfec \
         --instance-type t2.micro \
         --key-name $EC2_KEY_NAME \
-        --security-group-ids $EC2_SECURITY_GROUP \
-        --subnet-id $EC2_SUBNET_ID \
+        --network-interfaces "AssociatePublicIpAddress=true,DeviceIndex=0,Groups=$EC2_SECURITY_GROUP,SubnetId=$EC2_SUBNET_ID" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-instance}]" \
         --query 'Instances[0].InstanceId' \
         --output text)
