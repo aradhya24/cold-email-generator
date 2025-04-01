@@ -51,8 +51,18 @@ deploy:
     DOCKER_TLS_VERIFY: ""
     DOCKER_CERT_PATH: ""
   before_script:
-    - apk add --no-cache openssh-client curl python3 py3-pip
+    # Install required packages
+    - apk add --no-cache openssh-client curl python3 py3-pip git
+    
+    # Clone the repository to ensure we have all files
+    - git config --global user.email "gitlab-ci@example.com"
+    - git config --global user.name "GitLab CI"
+    - git clone $CI_REPOSITORY_URL ./ || echo "Repository already exists"
+    
+    # Install AWS CLI
     - pip3 install awscli
+    
+    # Setup SSH
     - eval $(ssh-agent -s)
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
@@ -187,12 +197,24 @@ deploy:
       echo "Creating directories and setting permissions..."
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo mkdir -p /opt/cold-email/{app,scripts,k8s} && sudo chown -R ubuntu:ubuntu /opt/cold-email"
       
+      # List local directory contents for debugging
+      echo "Local directory contents:"
+      ls -la
+      
       # Copy files in parallel with proper error handling
       echo "Copying files..."
       copy_with_retries() {
         local src="$1"
         local dest="$2"
         local retries=3
+        
+        # Check if source exists
+        if [ ! -e "$src" ]; then
+          echo "Source $src does not exist!"
+          ls -la $(dirname "$src")
+          return 1
+        fi
+        
         for i in $(seq 1 $retries); do
           if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r "$src" "ubuntu@$PUBLIC_IP:$dest"; then
             return 0
@@ -204,11 +226,15 @@ deploy:
         return 1
       }
 
-      # Copy each directory with retries
-      copy_with_retries "app/*" "/opt/cold-email/app/" &
-      copy_with_retries "scripts/*" "/opt/cold-email/scripts/" &
-      copy_with_retries "k8s/*" "/opt/cold-email/k8s/" &
-      wait
+      # Copy each directory individually
+      echo "Copying app directory..."
+      copy_with_retries "app" "/opt/cold-email/" || exit 1
+      
+      echo "Copying scripts directory..."
+      copy_with_retries "scripts" "/opt/cold-email/" || exit 1
+      
+      echo "Copying k8s directory..."
+      copy_with_retries "k8s" "/opt/cold-email/" || exit 1
       
       # Verify files were copied
       echo "Verifying file copy..."
