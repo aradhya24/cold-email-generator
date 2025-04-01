@@ -82,6 +82,61 @@ sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/conf
 sudo systemctl restart containerd
 sudo systemctl enable containerd
 
+# Install Kubernetes packages
+echo "Installing Kubernetes packages..."
+wait_for_apt
+
+# Add Kubernetes repository key
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+# Add Kubernetes repository
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+# Update package lists
+wait_for_apt
+sudo apt-get update
+
+# Install specific versions of Kubernetes components
+wait_for_apt
+sudo apt-get install -y kubelet=1.28.* kubeadm=1.28.* kubectl=1.28.*
+sudo apt-mark hold kubelet kubeadm kubectl
+
+# Verify installations
+echo "Verifying Kubernetes component versions:"
+kubelet --version || echo "Failed to get kubelet version"
+kubeadm version || echo "Failed to get kubeadm version"
+kubectl version --client || echo "Failed to get kubectl version"
+
+# Verify packages are installed
+if ! command -v kubeadm &> /dev/null || ! command -v kubectl &> /dev/null || ! command -v kubelet &> /dev/null; then
+    echo "ERROR: Required Kubernetes components are not installed. Installation failed."
+    echo "Attempting alternative installation method..."
+    
+    # Clean up any failed installations
+    sudo apt-get remove -y kubeadm kubectl kubelet || true
+    sudo apt-get clean
+    sudo rm -rf /var/lib/apt/lists/*
+    
+    # Try alternative repository
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+    
+    wait_for_apt
+    sudo apt-get update
+    wait_for_apt
+    sudo apt-get install -y kubelet kubeadm kubectl
+    sudo apt-mark hold kubelet kubeadm kubectl
+    
+    # Verify again
+    if ! command -v kubeadm &> /dev/null; then
+        echo "ERROR: Failed to install Kubernetes components after multiple attempts."
+        exit 1
+    fi
+fi
+
+echo "Kubernetes components successfully installed!"
+
 # Reset any existing Kubernetes setup
 echo "Resetting any existing Kubernetes setup..."
 sudo kubeadm reset -f || true
