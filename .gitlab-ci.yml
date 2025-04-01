@@ -57,14 +57,14 @@ deploy:
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
     
-    # Create SSH key directly instead of trying to interpret format
-    - echo "$SSH_PRIVATE_KEY" | tr -d '\r\n' > ~/.ssh/id_rsa
-    - chmod 600 ~/.ssh/id_rsa
-    - ssh-add ~/.ssh/id_rsa || echo "Failed to add SSH key, continuing anyway"
+    # Generate a new SSH key for this pipeline run
+    - echo "Generating new SSH key..."
+    - ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
+    - chmod 600 ~/.ssh/ec2_key
+    - ssh-add ~/.ssh/ec2_key
+    - cat ~/.ssh/ec2_key.pub > ec2_key.pub
     
     # Set up known hosts and disable strict host checking
-    - echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
-    - chmod 644 ~/.ssh/known_hosts
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
     
     # Configure AWS credentials and region
@@ -85,12 +85,6 @@ deploy:
       echo "Launching EC2 instance..."
       
       # Check if required AWS variables are set
-      if [ -z "$EC2_KEY_NAME" ]; then
-        echo "ERROR: EC2_KEY_NAME is not set. Please add this variable in GitLab CI/CD settings."
-        echo "Example value: my-key-pair"
-        exit 1
-      fi
-      
       if [ -z "$EC2_SECURITY_GROUP" ]; then
         echo "ERROR: EC2_SECURITY_GROUP is not set. Please add this variable in GitLab CI/CD settings."
         echo "Example value: sg-0123456789abcdef"
@@ -103,13 +97,26 @@ deploy:
         exit 1
       fi
       
+      # Launch instance with our public key as user data
+      USER_DATA=$(cat <<EOF
+#!/bin/bash
+mkdir -p /home/ubuntu/.ssh
+echo "$(cat ec2_key.pub)" >> /home/ubuntu/.ssh/authorized_keys
+chmod 700 /home/ubuntu/.ssh
+chmod 600 /home/ubuntu/.ssh/authorized_keys
+chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+EOF
+)
+      
+      ENCODED_USER_DATA=$(echo "$USER_DATA" | base64)
+      
       INSTANCE_ID=$(aws ec2 run-instances \
         --region us-east-1 \
         --image-id ami-0c7217cdde317cfec \
         --instance-type t2.micro \
-        --key-name $EC2_KEY_NAME \
         --network-interfaces "AssociatePublicIpAddress=true,DeviceIndex=0,Groups=$EC2_SECURITY_GROUP,SubnetId=$EC2_SUBNET_ID" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-instance}]" \
+        --user-data "$ENCODED_USER_DATA" \
         --query 'Instances[0].InstanceId' \
         --output text)
       
@@ -161,7 +168,7 @@ deploy:
       # Wait for SSH to be available
       echo "Waiting for SSH to become available..."
       for i in 1 2 3 4 5 6; do
-        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"; then
+        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"; then
           echo "SSH connection established"
           break
         fi
@@ -177,30 +184,30 @@ deploy:
       
       # Create necessary directories
       echo "Creating directories..."
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$PUBLIC_IP "sudo mkdir -p /opt/cold-email/{app,scripts,k8s}"
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo mkdir -p /opt/cold-email/{app,scripts,k8s}"
       
       # Copy files in parallel
       echo "Copying files..."
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r app/* ubuntu@$PUBLIC_IP:/opt/cold-email/app/ &
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r scripts/* ubuntu@$PUBLIC_IP:/opt/cold-email/scripts/ &
-      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r k8s/* ubuntu@$PUBLIC_IP:/opt/cold-email/k8s/ &
+      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r app/* ubuntu@$PUBLIC_IP:/opt/cold-email/app/ &
+      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r scripts/* ubuntu@$PUBLIC_IP:/opt/cold-email/scripts/ &
+      scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key -r k8s/* ubuntu@$PUBLIC_IP:/opt/cold-email/k8s/ &
       wait
       
       # Create and copy configuration files
       echo "Creating configuration files..."
-      echo "GROQ_API_KEY=$GROQ_API_KEY" | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$PUBLIC_IP "sudo tee /opt/cold-email/app/.env"
+      echo "GROQ_API_KEY=$GROQ_API_KEY" | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo tee /opt/cold-email/app/.env"
       
       # Make scripts executable
       echo "Making scripts executable..."
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$PUBLIC_IP "sudo chmod +x /opt/cold-email/scripts/*.sh"
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "sudo chmod +x /opt/cold-email/scripts/*.sh"
       
       # Run setup script
       echo "Running setup script..."
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$PUBLIC_IP "cd /opt/cold-email && sudo ./scripts/setup-k8s.sh"
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "cd /opt/cold-email && sudo ./scripts/setup-k8s.sh"
       
       # Finalize deployment
       echo "Finalizing deployment..."
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$PUBLIC_IP "cd /opt/cold-email && sudo ./scripts/deploy-k8s.sh"
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/ec2_key ubuntu@$PUBLIC_IP "cd /opt/cold-email && sudo ./scripts/deploy-k8s.sh"
       
       echo "Deployment completed successfully!"
   artifacts:
@@ -219,11 +226,14 @@ monitor:
     mkdir -p ~/.ssh && chmod 700 ~/.ssh &
     wait
     
-    # Create SSH key directly without trying to interpret format
-    echo "$AWS_SSH_KEY" | tr -d '\r\n' > ~/.ssh/id_rsa
-    chmod 600 ~/.ssh/id_rsa
-    eval $(ssh-agent -s)
-    ssh-add ~/.ssh/id_rsa || echo "Failed to add SSH key, continuing anyway"
+    # Generate a new SSH key for this pipeline run
+    echo "Generating new SSH key..."
+    ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
+    chmod 600 ~/.ssh/ec2_key
+    ssh-add ~/.ssh/ec2_key
+    cat ~/.ssh/ec2_key.pub > ec2_key.pub
+    
+    # Set up SSH config
     echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
     
     # Setup AWS credentials
@@ -235,7 +245,11 @@ monitor:
     echo "Verifying AWS configuration:"
     aws configure list
     echo "Testing AWS connection:"
-    aws ec2 describe-regions --output text | head -1 || echo "AWS connection failed"
+    aws ec2 describe-regions --region us-east-1 --output text | head -1 || echo "AWS connection failed"
+    
+    # Get information about all EC2 instances
+    echo "Listing all EC2 instances for troubleshooting:"
+    aws ec2 describe-instances --region us-east-1 --query "Reservations[*].Instances[*].[InstanceId,State.Name,Tags[?Key=='Name'].Value|[0],PublicIpAddress]" --output text
     
     # Get instance IP with better error handling
     echo "Searching for EC2 instance..."
@@ -260,7 +274,7 @@ monitor:
       local command="$1"
       for i in {1..3}; do
         echo "Attempt $i: Running command via SSH..."
-        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 ${AWS_USER}@${EC2_IP} "$command"; then
+        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -i ~/.ssh/ec2_key ${AWS_USER}@${EC2_IP} "$command"; then
           echo "Command executed successfully!"
           return 0
         fi
