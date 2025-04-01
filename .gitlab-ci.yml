@@ -54,9 +54,22 @@ deploy:
     - apk add --no-cache openssh-client curl python3 py3-pip
     - pip3 install awscli
     - eval $(ssh-agent -s)
-    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
     - mkdir -p ~/.ssh
     - chmod 700 ~/.ssh
+    # Debug SSH key format (print first few characters)
+    - echo "First few characters of SSH key (for debugging format):" && echo "$SSH_PRIVATE_KEY" | head -c 10 | xxd -p
+    # Try to detect and handle different key formats
+    - |
+      if echo "$SSH_PRIVATE_KEY" | grep -q "OPENSSH PRIVATE KEY"; then
+        echo "OpenSSH format detected"
+        echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+      elif echo "$SSH_PRIVATE_KEY" | grep -q "BEGIN RSA PRIVATE KEY"; then
+        echo "PEM format detected"
+        echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+      else
+        echo "Unknown key format, trying base64 decode..."
+        echo "$SSH_PRIVATE_KEY" | base64 -d | tr -d '\r' | ssh-add -
+      fi
     - echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
     - chmod 644 ~/.ssh/known_hosts
     - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
@@ -159,14 +172,26 @@ monitor:
   image: python:3.9-slim
   script: |
     # Install required packages and setup in parallel
-    apt-get update && apt-get install -y openssh-client python3-pip &
+    apt-get update && apt-get install -y openssh-client python3-pip xxd &
     pip install awscli &
     mkdir -p ~/.ssh && chmod 700 ~/.ssh &
-    echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa &
     wait
     
     chmod 600 ~/.ssh/id_rsa
-    eval $(ssh-agent -s) && ssh-add ~/.ssh/id_rsa
+    eval $(ssh-agent -s)
+    # Debug SSH key format and try multiple formats
+    echo "First few characters of SSH key (for debugging format):" && echo "$AWS_SSH_KEY" | head -c 10 | xxd -p
+    if echo "$AWS_SSH_KEY" | grep -q "OPENSSH PRIVATE KEY"; then
+      echo "OpenSSH format detected"
+      echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    elif echo "$AWS_SSH_KEY" | grep -q "BEGIN RSA PRIVATE KEY"; then
+      echo "PEM format detected"
+      echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    else
+      echo "Unknown key format, trying base64 decode..."
+      echo "$AWS_SSH_KEY" | base64 -d | tr -d '\r' > ~/.ssh/id_rsa
+    fi
+    ssh-add ~/.ssh/id_rsa
     echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
     
     # Setup AWS credentials
