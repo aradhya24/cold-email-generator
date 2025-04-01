@@ -5,7 +5,7 @@ set -e
 wait_for_apt() {
     echo "Checking if apt is locked..."
     WAIT_TIME=0
-    MAX_WAIT_TIME=300  # 5 minutes maximum wait (reduced from 10)
+    MAX_WAIT_TIME=300  # 5 minutes maximum wait
 
     while (sudo lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || sudo lsof /var/lib/dpkg/lock >/dev/null 2>&1); do
         echo "APT is still locked by another process. Waiting... (${WAIT_TIME}s elapsed)"
@@ -24,7 +24,7 @@ wait_for_apt() {
             break
         fi
         
-        sleep 5  # Reduced from 10 to 5 seconds
+        sleep 5
         WAIT_TIME=$((WAIT_TIME + 5))
     done
     
@@ -72,12 +72,10 @@ wait_for_apt
 sudo apt-get update || (echo "Failed to update apt, retrying with different method" && \
     wait_for_apt && sudo apt-get update --fix-missing)
 
-# Install Kubernetes components
+# Install specific versions of Kubernetes components
 echo "Installing Kubernetes components..."
 wait_for_apt
-sudo apt-get install -y kubelet kubeadm kubectl || \
-    (echo "Failed to install kubeadm, trying older version" && \
-     wait_for_apt && sudo apt-get install -y kubelet=1.27.0-00 kubeadm=1.27.0-00 kubectl=1.27.0-00)
+sudo apt-get install -y kubelet=1.29.0-00 kubeadm=1.29.0-00 kubectl=1.29.0-00
 sudo apt-mark hold kubelet kubeadm kubectl
 
 # Setup for Kubernetes (combine all setup steps)
@@ -107,27 +105,30 @@ if [ -f "/etc/kubernetes/admin.conf" ]; then
     sudo rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd $HOME/.kube
 fi
 
-# Pre-pull images and initialize Kubernetes in one step
-echo "Pre-pulling Kubernetes images and initializing cluster..."
-sudo kubeadm config images pull --kubernetes-version=1.27.0 || echo "Failed to pull images - continuing anyway"
-
-# Initialize Kubernetes with simplified approach
+# Initialize Kubernetes with proper version and bootstrap token
 echo "Initializing Kubernetes cluster..."
-sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --kubernetes-version=1.27.0 --ignore-preflight-errors=all --skip-phases=bootstrap-token || \
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16 \
+    --kubernetes-version=v1.29.0 \
+    --ignore-preflight-errors=all \
+    --token-ttl=0 \
+    --token=abcdef.0123456789abcdef \
+    --apiserver-advertise-address=$(hostname -i) || \
     (echo "First initialization attempt failed, trying alternative approach..." && \
-     sudo kubeadm init --ignore-preflight-errors=all --skip-token-print --skip-phases=bootstrap-token || \
-     (echo "Second initialization attempt failed, trying with minimum configuration..." && \
-      sudo kubeadm init --skip-phases=bootstrap-token,addon/kube-proxy --ignore-preflight-errors=all))
+     sudo kubeadm init --ignore-preflight-errors=all \
+     --kubernetes-version=v1.29.0 \
+     --token-ttl=0 \
+     --token=abcdef.0123456789abcdef \
+     --apiserver-advertise-address=$(hostname -i))
 
 # Set up kubectl configuration
 mkdir -p $HOME/.kube
-for i in {1..15}; do  # Reduced from 30 to 15 attempts
+for i in {1..15}; do
     if [ -f "/etc/kubernetes/admin.conf" ]; then
         sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
         break
     fi
     echo "Waiting for admin.conf to be created (attempt $i/15)..."
-    sleep 5  # Reduced from 10 to 5 seconds
+    sleep 5
 done
 
 # Ensure we have the config file
@@ -148,20 +149,20 @@ echo 'export KUBECONFIG=$HOME/.kube/config' | sudo tee /etc/profile.d/kubeconfig
 sudo chmod +x /etc/profile.d/kubeconfig.sh
 export KUBECONFIG=$HOME/.kube/config
 
-# Wait for Kubernetes API with reduced timeout
+# Wait for Kubernetes API
 echo "Waiting for Kubernetes API to become available..."
 ATTEMPTS=0
-MAX_ATTEMPTS=15  # Reduced from 30 to 15
+MAX_ATTEMPTS=15
 until kubectl get nodes || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
     echo "Waiting for Kubernetes API to respond (attempt $ATTEMPTS/$MAX_ATTEMPTS)..."
     ATTEMPTS=$((ATTEMPTS+1))
-    sleep 5  # Reduced from 10 to 5 seconds
+    sleep 5
 done
 
 if [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; then
     echo "Kubernetes API did not become available in time. Trying to restart kubelet service..."
     sudo systemctl restart kubelet
-    sleep 15  # Reduced from 30 to 15 seconds
+    sleep 15
     
     if ! kubectl get nodes; then
         echo "Still cannot access API. Using a minimal approach..."
@@ -177,14 +178,14 @@ echo "Installing Flannel CNI plugin..."
 kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml || \
     echo "Failed to install Flannel - continuing anyway"
 
-# Wait for core DNS with reduced timeout
+# Wait for core DNS
 echo "Waiting for CoreDNS to be ready..."
 ATTEMPTS=0
-MAX_ATTEMPTS=15  # Reduced from 30 to 15
+MAX_ATTEMPTS=15
 until kubectl -n kube-system get pods -l k8s-app=kube-dns -o jsonpath='{.items[*].status.phase}' | grep Running || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
     echo "Waiting for CoreDNS to be ready (attempt $ATTEMPTS/$MAX_ATTEMPTS)..."
     ATTEMPTS=$((ATTEMPTS+1))
-    sleep 5  # Reduced from 10 to 5 seconds
+    sleep 5
 done
 
 # Allow scheduling pods on the master node
