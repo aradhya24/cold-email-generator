@@ -38,177 +38,180 @@ sudo apt-get update
 wait_for_apt
 sudo apt-get install -y docker.io apt-transport-https ca-certificates curl
 
-# Start Docker immediately
+# Start Docker immediately and configure it
+echo "Configuring Docker..."
+cat <<EOF | sudo tee /etc/docker/daemon.json
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+EOF
+
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo systemctl daemon-reload
+sudo systemctl restart docker
 sudo systemctl enable docker
-sudo systemctl start docker
 
-# Clean up any existing Kubernetes repository configurations
-echo "Cleaning up any existing Kubernetes repository configurations..."
-sudo rm -f /etc/apt/sources.list.d/kubernetes.list /etc/apt/sources.list.d/kubectl.list /etc/apt/sources.list.d/kubernetes-xenial.list /etc/apt/keyrings/kubernetes-apt-keyring.gpg /etc/apt/keyrings/kubernetes-archive-keyring.gpg
-sudo apt-key del BA07F4FB 2>/dev/null || true
+# Setup networking prerequisites
+echo "Setting up networking prerequisites..."
+sudo modprobe br_netfilter
+sudo modprobe overlay
 
-# Remove any references to kubernetes-xenial from all apt sources
-echo "Removing any references to kubernetes-xenial..."
-sudo find /etc/apt/sources.list.d/ -type f -exec sed -i '/kubernetes-xenial/d' {} +
-sudo find /etc/apt/sources.list.d/ -type f -name "*kubernetes*.list" -delete
-
-# Clean apt cache and remove old lists
-echo "Cleaning apt cache and removing old lists..."
-wait_for_apt
-sudo apt-get clean
-sudo rm -rf /var/lib/apt/lists/*
-
-# Set up the new Kubernetes repository
-echo "Setting up new Kubernetes repository..."
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-
-# Add the repository using the new format
-echo "Adding Kubernetes repository..."
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-
-# Update package lists
-echo "Updating package lists..."
-wait_for_apt
-sudo apt-get update || (echo "Failed to update apt, retrying with different method" && \
-    wait_for_apt && sudo apt-get update --fix-missing)
-
-# Install Kubernetes components
-echo "Installing Kubernetes components..."
-wait_for_apt
-sudo apt-get install -y kubelet=1.28.* kubeadm=1.28.* kubectl=1.28.*
-sudo apt-mark hold kubelet kubeadm kubectl
-
-# Get installed versions for logging
-echo "Installed Kubernetes versions:"
-kubelet --version || echo "Failed to get kubelet version"
-kubeadm version || echo "Failed to get kubeadm version"
-kubectl version --client || echo "Failed to get kubectl version"
-
-# Setup for Kubernetes (combine all setup steps)
-echo "Setting up Kubernetes prerequisites..."
-cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
 overlay
 br_netfilter
 EOF
 
-sudo modprobe overlay br_netfilter || echo "Failed to load modules - continuing anyway"
-
-# sysctl params required by setup
-cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
 net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
 EOF
 
 sudo sysctl --system
-sudo swapoff -a
-sudo sed -i '/swap/d' /etc/fstab
+
+# Configure containerd
+echo "Configuring containerd..."
+sudo mkdir -p /etc/containerd
+containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
+sudo systemctl enable containerd
 
 # Reset any existing Kubernetes setup
-if [ -f "/etc/kubernetes/admin.conf" ]; then
-    echo "Found existing Kubernetes setup, resetting..."
-    sudo kubeadm reset -f
-    sudo rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd $HOME/.kube
+echo "Resetting any existing Kubernetes setup..."
+sudo kubeadm reset -f || true
+sudo rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd $HOME/.kube /var/lib/cni/
+sudo ip link delete cni0 || true
+sudo ip link delete flannel.1 || true
+sudo iptables -F && sudo iptables -t nat -F && sudo iptables -t mangle -F && sudo iptables -X
+
+# Get the primary IP address
+PRIMARY_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
+echo "Using primary IP: $PRIMARY_IP"
+
+# Create kubeadm config with additional settings
+cat <<EOF > kubeadm-config.yaml
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "${PRIMARY_IP}"
+  bindPort: 6443
+nodeRegistration:
+  criSocket: "unix:///var/run/containerd/containerd.sock"
+  taints: []
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+kubernetesVersion: "v1.28.0"
+apiServer:
+  extraArgs:
+    enable-admission-plugins: NodeRestriction
+    allow-privileged: "true"
+  timeoutForControlPlane: 4m0s
+controllerManager:
+  extraArgs:
+    node-cidr-mask-size: "24"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+failSwapOn: false
+EOF
+
+# Initialize Kubernetes with better error handling
+echo "Initializing Kubernetes cluster..."
+if ! sudo kubeadm init --config=kubeadm-config.yaml --ignore-preflight-errors=all --v=5; then
+    echo "First initialization attempt failed, checking logs..."
+    sudo journalctl -xeu kubelet
+    echo "Trying alternative initialization..."
+    sudo kubeadm init --ignore-preflight-errors=all --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address="${PRIMARY_IP}" --v=5
 fi
 
-# Initialize Kubernetes with proper version and bootstrap token
-echo "Initializing Kubernetes cluster..."
-echo "Using Kubernetes version: v1.28.0"
-
-sudo kubeadm init --pod-network-cidr=10.244.0.0/16 \
-    --kubernetes-version=v1.28.0 \
-    --ignore-preflight-errors=all \
-    --token-ttl=0 \
-    --token=abcdef.0123456789abcdef \
-    --apiserver-advertise-address=$(hostname -i) || \
-    (echo "First initialization attempt failed, trying alternative approach..." && \
-     sudo kubeadm init --ignore-preflight-errors=all \
-     --kubernetes-version=v1.28.0 \
-     --token-ttl=0 \
-     --token=abcdef.0123456789abcdef \
-     --apiserver-advertise-address=$(hostname -i))
-
-# Set up kubectl configuration
+# Set up kubectl configuration with retries
+echo "Setting up kubectl configuration..."
 mkdir -p $HOME/.kube
-for i in {1..15}; do
-    if [ -f "/etc/kubernetes/admin.conf" ]; then
-        sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+for i in {1..5}; do
+    if sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config; then
+        sudo chown $(id -u):$(id -g) $HOME/.kube/config
         break
     fi
-    echo "Waiting for admin.conf to be created (attempt $i/15)..."
+    echo "Attempt $i: Waiting for admin.conf to be available..."
     sleep 5
 done
 
-# Ensure we have the config file
-if [ ! -f "$HOME/.kube/config" ]; then
-    echo "Failed to get admin.conf, trying to find alternative config..."
-    KUBECONFIG_FILES=$(find /etc -name "kubeconfig" -o -name "*.conf" | grep -i kube 2>/dev/null || true)
-    if [ ! -z "$KUBECONFIG_FILES" ]; then
-        FIRST_CONFIG=$(echo "$KUBECONFIG_FILES" | head -n 1)
-        echo "Using alternative config: $FIRST_CONFIG"
-        sudo cp -i "$FIRST_CONFIG" $HOME/.kube/config
-    fi
-fi
-
-sudo chown $(id -u):$(id -g) $HOME/.kube/config
-
-# Make KUBECONFIG persistent
-echo 'export KUBECONFIG=$HOME/.kube/config' | sudo tee /etc/profile.d/kubeconfig.sh
-sudo chmod +x /etc/profile.d/kubeconfig.sh
+# Export and persist KUBECONFIG
 export KUBECONFIG=$HOME/.kube/config
+echo "export KUBECONFIG=$HOME/.kube/config" | sudo tee -a $HOME/.bashrc
+echo "export KUBECONFIG=$HOME/.kube/config" | sudo tee -a /etc/environment
 
-# Wait for Kubernetes API
-echo "Waiting for Kubernetes API to become available..."
+# Wait for API server with enhanced diagnostics
+echo "Waiting for API server to become available..."
 ATTEMPTS=0
-MAX_ATTEMPTS=15
-until kubectl get nodes || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
-    echo "Waiting for Kubernetes API to respond (attempt $ATTEMPTS/$MAX_ATTEMPTS)..."
+MAX_ATTEMPTS=30
+until curl -k https://${PRIMARY_IP}:6443/healthz >/dev/null 2>&1 || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
+    echo "Attempt $((ATTEMPTS+1))/$MAX_ATTEMPTS: API server not ready, checking status..."
+    
+    # Enhanced diagnostics
+    echo "Kubelet status and logs:"
+    sudo systemctl status kubelet || true
+    sudo journalctl -xeu kubelet --no-pager | tail -n 50 || true
+    
+    echo "API server container status:"
+    sudo crictl ps -a | grep kube-apiserver || true
+    
+    echo "API server logs:"
+    API_CONTAINER=$(sudo crictl ps -a | grep kube-apiserver | awk '{print $1}')
+    if [ ! -z "$API_CONTAINER" ]; then
+        sudo crictl logs $API_CONTAINER | tail -n 50 || true
+    fi
+    
     ATTEMPTS=$((ATTEMPTS+1))
-    sleep 5
+    sleep 10
 done
 
-if [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; then
-    echo "Kubernetes API did not become available in time. Trying to restart kubelet service..."
-    sudo systemctl restart kubelet
-    sleep 15
-    
-    if ! kubectl get nodes; then
-        echo "Still cannot access API. Using a minimal approach..."
-        kubectl create namespace cold-email --dry-run=client -o yaml | kubectl apply -f -
-        echo "Created namespace using minimal configuration."
-        echo "Skipping advanced Kubernetes setup. You'll need to manually configure networking."
-        exit 0
-    fi
+# Install Flannel with enhanced error handling
+echo "Installing Flannel CNI plugin..."
+if ! kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml; then
+    echo "Failed to install Flannel directly, trying alternative method..."
+    curl -sSL https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml | sed "s/10.244.0.0/10.244.0.0/g" | kubectl apply -f -
 fi
 
-# Install Flannel network plugin
-echo "Installing Flannel CNI plugin..."
-kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml || \
-    echo "Failed to install Flannel - continuing anyway"
-
-# Wait for core DNS
-echo "Waiting for CoreDNS to be ready..."
+# Wait for node to become ready
+echo "Waiting for node to become ready..."
 ATTEMPTS=0
-MAX_ATTEMPTS=15
-until kubectl -n kube-system get pods -l k8s-app=kube-dns -o jsonpath='{.items[*].status.phase}' | grep Running || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
-    echo "Waiting for CoreDNS to be ready (attempt $ATTEMPTS/$MAX_ATTEMPTS)..."
+MAX_ATTEMPTS=30
+until kubectl get nodes | grep -w "Ready" || [ $ATTEMPTS -eq $MAX_ATTEMPTS ]; do
+    echo "Attempt $((ATTEMPTS+1))/$MAX_ATTEMPTS: Node not ready..."
+    kubectl get nodes
     ATTEMPTS=$((ATTEMPTS+1))
-    sleep 5
+    sleep 10
 done
 
-# Allow scheduling pods on the master node
-kubectl taint nodes --all node-role.kubernetes.io/control-plane- || echo "No control-plane taint found - continuing"
-kubectl taint nodes --all node-role.kubernetes.io/master- || echo "No master taint found - continuing"
-
-# Create namespace and secret in one step
+# Create namespace and secret with enhanced error handling
 echo "Creating namespace and secret..."
-kubectl create namespace cold-email --dry-run=client -o yaml | kubectl apply -f -
-kubectl create secret generic app-secrets \
-  --namespace=cold-email \
-  --from-literal=GROQ_API_KEY=$GROQ_API_KEY \
-  --dry-run=client -o yaml | kubectl apply -f -
+if ! kubectl create namespace cold-email 2>/dev/null; then
+    echo "Namespace already exists or creation failed, trying to apply..."
+    kubectl create namespace cold-email --dry-run=client -o yaml | kubectl apply -f -
+fi
 
-echo "Kubernetes setup completed!"
-kubectl get nodes || echo "Failed to get nodes but continuing"
+if ! kubectl -n cold-email create secret generic app-secrets --from-literal=GROQ_API_KEY=$GROQ_API_KEY 2>/dev/null; then
+    echo "Secret already exists or creation failed, trying to apply..."
+    kubectl create secret generic app-secrets \
+        --namespace=cold-email \
+        --from-literal=GROQ_API_KEY=$GROQ_API_KEY \
+        --dry-run=client -o yaml | kubectl apply -f -
+fi
+
+# Final status check
+echo "Kubernetes setup completed! Checking final status..."
+kubectl get nodes -o wide
+kubectl get pods --all-namespaces
 echo "----------------------------------------------"
