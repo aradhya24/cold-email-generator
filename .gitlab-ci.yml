@@ -67,28 +67,62 @@ deploy_setup:
     # Check security group
     - SECURITY_GROUP_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
     - echo "Instance $INSTANCE_ID is using security group $SECURITY_GROUP_ID"
-    - AWS_QUERY="SecurityGroups[0].IpPermissions[?FromPort==\`22\`]"
-    - SSH_RULE_EXISTS=$(aws ec2 describe-security-groups --group-ids $SECURITY_GROUP_ID --query "$AWS_QUERY" --output text)
-    - if [ -z "$SSH_RULE_EXISTS" ]; then
-    -   echo "Adding SSH rule to security group"
-    -   aws ec2 authorize-security-group-ingress --group-id $SECURITY_GROUP_ID --protocol tcp --port 22 --cidr 0.0.0.0/0
-    -   sleep 15
-    - else
-    -   echo "SSH rule already exists"
-    - fi
+    
+    # Print security group details
+    - echo "Current security group rules:"
+    - aws ec2 describe-security-groups --group-ids $SECURITY_GROUP_ID --output json
+    
+    # Force update security group to allow SSH access from anywhere
+    - echo "Ensuring SSH access is allowed in security group..."
+    - aws ec2 authorize-security-group-ingress --group-id $SECURITY_GROUP_ID --protocol tcp --port 22 --cidr 0.0.0.0/0 || echo "Rule already exists or other error occurred"
+    - echo "Security group rules after update:"
+    - aws ec2 describe-security-groups --group-ids $SECURITY_GROUP_ID --output json
+    - echo "Waiting for security group changes to propagate..."
+    - sleep 20
+    
+    # Check network connectivity
+    - echo "Testing network connectivity to EC2 instance..."
+    - apt-get update && apt-get install -y iputils-ping telnet || true
+    - echo "Pinging $EC2_IP:"
+    - ping -c 4 $EC2_IP || echo "Ping failed - this is common if ICMP is blocked"
+    - echo "Attempting telnet to port 22:"
+    - timeout 5 bash -c "</dev/tcp/$EC2_IP/22" && echo "Port 22 is open" || echo "Port 22 is not reachable"
+    
+    # Print instance details for debugging
+    - echo "EC2 instance details:"
+    - aws ec2 describe-instances --instance-ids $INSTANCE_ID --output json
+    - echo "Getting console output from the instance:"
+    - aws ec2 get-console-output --instance-id $INSTANCE_ID || echo "Console output not available"
     
     # Test SSH connection
+    - echo "Testing SSH connection with debugging..."
+    - echo "SSH public key being used:"
+    - ssh-keygen -y -f ~/.ssh/id_rsa
     - for i in {1..5}; do
-    -   echo "SSH attempt $i..."
-    -   if ssh -v -o ConnectTimeout=20 ${AWS_USER}@${EC2_IP} "echo SSH success"; then
+    -   echo "SSH attempt $i with verbose logging..."
+    -   if ssh -v -o ConnectTimeout=30 ${AWS_USER}@${EC2_IP} "echo SSH success"; then
     -     echo "SSH connection established!"
     -     break
+    -   else
+    -     echo "SSH connection failed. Detailed diagnostics:"
+    -     echo "1. Instance state: $(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].State.Name' --output text)"
+    -     echo "2. Instance status checks:"
+    -     aws ec2 describe-instance-status --instance-ids $INSTANCE_ID --output json || echo "No status information available"
+    -     echo "Waiting 30 seconds before retrying..."
+    -     sleep 30
     -   fi
     -   if [ $i -eq 5 ]; then
-    -     echo "Could not establish SSH after 5 attempts."
+    -     echo "Could not establish SSH after 5 attempts. Check these common issues:"
+    -     echo "1. Security group rules - ensure port 22 is open (we attempted to add this rule)"
+    -     echo "2. Instance startup - ensure the instance has completed initialization"
+    -     echo "3. SSH key - ensure the AWS_SSH_KEY variable matches the key used for the instance"
+    -     echo "4. Network ACLs - ensure your VPC network ACLs allow port 22"
+    -     echo "5. SSH service - ensure sshd service is running on the instance"
+    -     echo ""
+    -     echo "Consider manually connecting to the instance from the AWS console"
+    -     echo "or launching a new instance with proper SSH access."
     -     exit 1
     -   fi
-    -   sleep 20
     - done
     
     # Setup Kubernetes
