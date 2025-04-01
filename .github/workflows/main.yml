@@ -64,6 +64,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     env:
       LB_DNS: ''
+    outputs:
+      public_ip: ${{ env.PUBLIC_IP }}
+      ssh_key: ${{ steps.ssh_key.outputs.private_key }}
     steps:
       - uses: actions/checkout@v4
       
@@ -75,6 +78,7 @@ jobs:
           aws-region: us-east-1
           
       - name: Set up SSH
+        id: ssh_key
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
@@ -85,6 +89,8 @@ jobs:
           ssh-add ~/.ssh/ec2_key
           cat ~/.ssh/ec2_key.pub > ec2_key.pub
           echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+          # Save private key for monitor stage
+          echo "private_key=$(cat ~/.ssh/ec2_key | base64 -w 0)" >> "$GITHUB_OUTPUT"
           
       - name: Launch EC2 Instance
         run: |
@@ -192,11 +198,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
           
-      - name: Set up SSH
+      - name: Set up SSH with deploy key
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
+          # Restore the SSH key from deploy stage
+          echo "${{ needs.deploy.outputs.ssh_key }}" | base64 -d > ~/.ssh/ec2_key
           chmod 600 ~/.ssh/ec2_key
           eval $(ssh-agent -s)
           ssh-add ~/.ssh/ec2_key
@@ -217,8 +224,25 @@ jobs:
             exit 1
           fi
           
-          # Check Kubernetes status
-          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get nodes"
-          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get pods --all-namespaces"
-          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get pods -n default -l app=cold-email-generator"
-          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get svc -n default" 
+          echo "Using EC2 IP: $EC2_IP"
+          
+          # Test SSH connection first
+          echo "Testing SSH connection..."
+          if ! ssh -i ~/.ssh/ec2_key -o ConnectTimeout=10 ubuntu@$EC2_IP "echo 'SSH connection successful'"; then
+            echo "Failed to establish SSH connection"
+            exit 1
+          fi
+          
+          # Check Kubernetes status with improved error handling
+          echo "Checking Kubernetes cluster status..."
+          for cmd in \
+            "sudo kubectl get nodes" \
+            "sudo kubectl get pods --all-namespaces" \
+            "sudo kubectl get pods -n default -l app=cold-email-generator" \
+            "sudo kubectl get svc -n default"; do
+            echo "Running: $cmd"
+            if ! ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "$cmd"; then
+              echo "Failed to execute: $cmd"
+              exit 1
+            fi
+          done 
