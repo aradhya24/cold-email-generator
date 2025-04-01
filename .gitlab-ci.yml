@@ -218,3 +218,4 @@ monitor:
     reports:
       dotenv: lb_dns.env
     expire_in: 1 week
+  when: always
