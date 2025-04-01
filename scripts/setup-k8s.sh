@@ -44,28 +44,36 @@ sudo systemctl start docker
 
 # Clean up any existing Kubernetes repository configurations
 echo "Cleaning up any existing Kubernetes repository configurations..."
-sudo rm -f /etc/apt/sources.list.d/kubernetes.list /etc/apt/sources.list.d/kubectl.list /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+sudo rm -f /etc/apt/sources.list.d/kubernetes.list /etc/apt/sources.list.d/kubectl.list /etc/apt/sources.list.d/kubernetes-xenial.list /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 sudo apt-key del BA07F4FB 2>/dev/null || true
 
-# Remove any references to kubernetes-xenial
-sudo sed -i '/kubernetes-xenial/d' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-sudo rm -f /etc/apt/sources.list.d/kubernetes-xenial.list 2>/dev/null || true
+# Remove any references to kubernetes-xenial from all apt sources
+echo "Removing any references to kubernetes-xenial..."
+sudo find /etc/apt/sources.list.d/ -type f -exec sed -i '/kubernetes-xenial/d' {} +
+sudo find /etc/apt/sources.list.d/ -type f -name "*kubernetes*.list" -delete
+
+# Clean apt cache and remove old lists
+echo "Cleaning apt cache and removing old lists..."
+wait_for_apt
+sudo apt-get clean
+sudo rm -rf /var/lib/apt/lists/*
 
 # Set up repository properly
+echo "Setting up new Kubernetes repository..."
 sudo mkdir -p /etc/apt/keyrings
 curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
 # Add the Kubernetes repository
 echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
-# Clean apt cache and update
-echo "Cleaning apt cache and updating..."
-wait_for_apt
-sudo apt-get clean
-sudo rm -rf /var/lib/apt/lists/*
+# Update package lists
+echo "Updating package lists..."
 wait_for_apt
 sudo apt-get update || (echo "Failed to update apt, retrying with different method" && \
     wait_for_apt && sudo apt-get update --fix-missing)
+
+# Install Kubernetes components
+echo "Installing Kubernetes components..."
 wait_for_apt
 sudo apt-get install -y kubelet kubeadm kubectl || \
     (echo "Failed to install kubeadm, trying older version" && \
