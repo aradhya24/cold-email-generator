@@ -128,9 +128,7 @@ deploy:
       
       # Create and copy configuration files
       echo "Creating configuration files..."
-      cat <<EOF | ssh ubuntu@$PUBLIC_IP "sudo tee /opt/cold-email/app/.env"
-GROQ_API_KEY=$GROQ_API_KEY
-EOF
+      echo "GROQ_API_KEY=$GROQ_API_KEY" | ssh ubuntu@$PUBLIC_IP "sudo tee /opt/cold-email/app/.env"
       
       # Make scripts executable
       echo "Making scripts executable..."
