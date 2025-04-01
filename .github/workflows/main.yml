@@ -66,7 +66,6 @@ jobs:
       LB_DNS: ''
     outputs:
       public_ip: ${{ env.PUBLIC_IP }}
-      ssh_key: ${{ steps.ssh_key.outputs.private_key }}
     steps:
       - uses: actions/checkout@v4
       
@@ -89,8 +88,17 @@ jobs:
           ssh-add ~/.ssh/ec2_key
           cat ~/.ssh/ec2_key.pub > ec2_key.pub
           echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
-          # Save private key for monitor stage
-          echo "private_key=$(cat ~/.ssh/ec2_key | base64 -w 0)" >> "$GITHUB_OUTPUT"
+          # Save SSH keys for monitor stage
+          mkdir -p ssh_keys
+          cp ~/.ssh/ec2_key ssh_keys/
+          cp ~/.ssh/ec2_key.pub ssh_keys/
+          
+      - name: Upload SSH keys
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-keys
+          path: ssh_keys/
+          retention-days: 1
           
       - name: Launch EC2 Instance
         run: |
@@ -198,12 +206,18 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
           
-      - name: Set up SSH with deploy key
+      - name: Download SSH keys
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-keys
+          path: ssh_keys
+          
+      - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          # Restore the SSH key from deploy stage
-          echo "${{ needs.deploy.outputs.ssh_key }}" | base64 -d > ~/.ssh/ec2_key
+          cp ssh_keys/ec2_key ~/.ssh/
+          cp ssh_keys/ec2_key.pub ~/.ssh/
           chmod 600 ~/.ssh/ec2_key
           eval $(ssh-agent -s)
           ssh-add ~/.ssh/ec2_key
@@ -211,27 +225,48 @@ jobs:
           
       - name: Monitor Deployment
         run: |
-          # Get instance IP
-          INSTANCE_INFO=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
-            --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
-            --output text)
+          # Get instance IP with improved error handling
+          MAX_RETRIES=5
+          RETRY_DELAY=10
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i to get EC2 instance info..."
             
-          EC2_IP=$(echo "$INSTANCE_INFO" | awk '{print $2}')
+            INSTANCE_INFO=$(aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+              --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
+              --output text)
+              
+            EC2_IP=$(echo "$INSTANCE_INFO" | awk '{print $2}')
+            
+            if [ ! -z "$EC2_IP" ] && [ "$EC2_IP" != "None" ] && [ "$EC2_IP" != "null" ]; then
+              echo "Found EC2 instance with IP: $EC2_IP"
+              break
+            fi
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Failed to get EC2 instance IP after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            
+            echo "No valid IP found, waiting $RETRY_DELAY seconds before retry..."
+            sleep $RETRY_DELAY
+          done
           
-          if [ -z "$EC2_IP" ]; then
-            echo "Failed to get EC2 instance IP"
-            exit 1
-          fi
-          
-          echo "Using EC2 IP: $EC2_IP"
-          
-          # Test SSH connection first
-          echo "Testing SSH connection..."
-          if ! ssh -i ~/.ssh/ec2_key -o ConnectTimeout=10 ubuntu@$EC2_IP "echo 'SSH connection successful'"; then
-            echo "Failed to establish SSH connection"
-            exit 1
-          fi
+          # Test SSH connection with retries
+          echo "Testing SSH connection to $EC2_IP..."
+          for i in $(seq 1 3); do
+            if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=10 -o BatchMode=yes ubuntu@$EC2_IP "echo 'SSH connection successful'"; then
+              echo "SSH connection established on attempt $i"
+              break
+            fi
+            if [ $i -eq 3 ]; then
+              echo "Failed to establish SSH connection after 3 attempts"
+              exit 1
+            fi
+            echo "SSH connection failed, waiting 10 seconds before retry..."
+            sleep 10
+          done
           
           # Check Kubernetes status with improved error handling
           echo "Checking Kubernetes cluster status..."
