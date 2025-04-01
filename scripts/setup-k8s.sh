@@ -18,13 +18,10 @@ sudo apt-get install -y apt-transport-https ca-certificates curl
 if [ ! -d "/etc/apt/keyrings" ]; then
     sudo mkdir -p /etc/apt/keyrings
 fi
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg || \
-    (echo "Failed to add k8s GPG key, trying alternative method"; \
-     curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -)
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-# Try to add the repository with fallback
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list || \
-    echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+# Add the Kubernetes repository
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
 sudo apt-get update || (echo "Failed to update apt, retrying with different method" && \
     sudo apt-get update --fix-missing)
