@@ -25,6 +25,8 @@ validate:
     - apt-get update && apt-get install -y python3-pip
     - pip install -r requirements.txt
     - python -c "import app.main" || echo "Validation failed but continuing"
+  rules:
+    - if: $SKIP_VALIDATE_BUILD == null
 
 build:
   stage: build
@@ -34,6 +36,8 @@ build:
     - docker tag $DOCKER_IMAGE $CI_REGISTRY/aradhya24/cold-email-generator:latest
     - docker push $DOCKER_IMAGE 
     - docker push $CI_REGISTRY/aradhya24/cold-email-generator:latest
+  rules:
+    - if: $SKIP_VALIDATE_BUILD == null
 
 deploy:
   stage: deploy
@@ -47,7 +51,8 @@ deploy:
     DOCKER_TLS_VERIFY: ""
     DOCKER_CERT_PATH: ""
   before_script:
-    - apk add --no-cache openssh-client curl awscli
+    - apk add --no-cache openssh-client curl python3 py3-pip
+    - pip3 install awscli
     - eval $(ssh-agent -s)
     - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
     - mkdir -p ~/.ssh
@@ -67,7 +72,7 @@ deploy:
         --key-name $EC2_KEY_NAME \
         --security-group-ids $EC2_SECURITY_GROUP \
         --subnet-id $EC2_SUBNET_ID \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-${CI_COMMIT_SHA}}]" \
+        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-instance}]" \
         --query 'Instances[0].InstanceId' \
         --output text)
       
@@ -154,7 +159,8 @@ monitor:
   image: python:3.9-slim
   script: |
     # Install required packages and setup in parallel
-    apt-get update && apt-get install -y openssh-client awscli &
+    apt-get update && apt-get install -y openssh-client python3-pip &
+    pip install awscli &
     mkdir -p ~/.ssh && chmod 700 ~/.ssh &
     echo "$AWS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa &
     wait
