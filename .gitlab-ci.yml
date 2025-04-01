@@ -54,26 +54,51 @@ deploy:
     export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
 
-    # Get EC2 instance IP
-    EC2_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+    # Get EC2 instance IP with better error handling
+    echo "Searching for EC2 instance..."
+    INSTANCE_INFO=$(aws ec2 describe-instances \
+      --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+      --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
+      --output text)
     
-    if [ -z "$EC2_IP" ]; then
+    if [ -z "$INSTANCE_INFO" ]; then
       echo "No running instance found. Launching new instance..."
       chmod +x scripts/launch_ec2.sh
       ./scripts/launch_ec2.sh
-      sleep 10
-      EC2_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+      sleep 15
+      
+      # Retry getting instance info
+      INSTANCE_INFO=$(aws ec2 describe-instances \
+        --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+        --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
+        --output text)
     fi
+    
+    # Extract IP from instance info
+    EC2_IP=$(echo "$INSTANCE_INFO" | awk '{print $2}')
+    INSTANCE_ID=$(echo "$INSTANCE_INFO" | awk '{print $1}')
+    
+    if [ -z "$EC2_IP" ]; then
+      echo "Failed to get EC2 instance IP. Instance info:"
+      echo "$INSTANCE_INFO"
+      exit 1
+    fi
+    
+    echo "Found EC2 instance: $INSTANCE_ID with IP: $EC2_IP"
 
     # Define SSH command function with retries
     run_ssh_command() {
       local command="$1"
       for i in {1..3}; do
+        echo "Attempt $i: Running command via SSH..."
         if ssh -o ConnectTimeout=5 ${AWS_USER}@${EC2_IP} "$command"; then
+          echo "Command executed successfully!"
           return 0
         fi
+        echo "Command failed. Waiting 10 seconds before retry..."
         sleep 10
       done
+      echo "Failed to execute command after 3 attempts."
       return 1
     }
 
@@ -99,6 +124,7 @@ deploy:
     run_ssh_command "sudo docker login -u gitlab-ci-token -p ${CI_JOB_TOKEN} ${CI_REGISTRY}" || exit 1
     run_ssh_command "cd ~/ && export CI_REGISTRY=${CI_REGISTRY} && export CI_COMMIT_SHA=${CI_COMMIT_SHA} && export GROQ_API_KEY=${GROQ_API_KEY} && sudo -E docker-compose up -d" || exit 1
     
+    # Create lb_dns.env file
     echo "LB_DNS=${EC2_IP}" > lb_dns.env
     echo "Application deployed at http://${EC2_IP}"
   environment:
@@ -129,18 +155,36 @@ monitor:
     export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
     
-    # Get instance IP
-    EC2_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+    # Get instance IP with better error handling
+    echo "Searching for EC2 instance..."
+    INSTANCE_INFO=$(aws ec2 describe-instances \
+      --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+      --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
+      --output text)
+    
+    EC2_IP=$(echo "$INSTANCE_INFO" | awk '{print $2}')
+    
+    if [ -z "$EC2_IP" ]; then
+      echo "Failed to get EC2 instance IP. Instance info:"
+      echo "$INSTANCE_INFO"
+      exit 1
+    fi
+    
+    echo "Found EC2 instance with IP: $EC2_IP"
     
     # Define SSH command function with retries
     run_ssh_command() {
       local command="$1"
       for i in {1..3}; do
+        echo "Attempt $i: Running command via SSH..."
         if ssh -o ConnectTimeout=5 ${AWS_USER}@${EC2_IP} "$command"; then
+          echo "Command executed successfully!"
           return 0
         fi
+        echo "Command failed. Waiting 10 seconds before retry..."
         sleep 10
       done
+      echo "Failed to execute command after 3 attempts."
       return 1
     }
     
