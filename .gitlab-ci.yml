@@ -213,3 +213,8 @@ monitor:
     curl -s -f -m 5 "http://${EC2_IP}/_stcore/health" || echo "Health check failed"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
+      when: always
+  artifacts:
+    reports:
+      dotenv: lb_dns.env
+    expire_in: 1 week
