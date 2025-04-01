@@ -283,7 +283,7 @@ monitor:
     - echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
     - echo "SSH_AGENT_PID=$SSH_AGENT_PID"
     
-    # Generate and configure SSH key
+    # Generate and configure SSH key with same key name as deploy stage
     - ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
     - chmod 600 ~/.ssh/ec2_key
     - ssh-add ~/.ssh/ec2_key
@@ -332,20 +332,31 @@ monitor:
         sleep $RETRY_DELAY
       done
       
-      # Create lb_dns.env file with proper permissions
+      # Create lb_dns.env file with proper format and permissions
       echo "Creating lb_dns.env file..."
-      echo "LB_DNS=$EC2_IP" > lb_dns.env
+      echo "LB_DNS=\"$EC2_IP\"" > lb_dns.env
       chmod 600 lb_dns.env
       
-      # Function to run SSH commands with retries
+      # Copy SSH key from deploy stage (if available)
+      if [ -f "/builds/aradhya24/cold-email-generator/ec2_key.pub" ]; then
+        echo "Found existing public key, using it..."
+        cat "/builds/aradhya24/cold-email-generator/ec2_key.pub" >> ~/.ssh/authorized_keys
+      fi
+      
+      # Function to run SSH commands with retries and debug output
       run_ssh_command() {
         local command="$1"
         local max_attempts=3
         local wait_time=10
         
+        # Debug SSH configuration
+        echo "SSH Debug: Checking key permissions and content"
+        ls -la ~/.ssh/
+        ssh-add -l || echo "No keys in agent"
+        
         for attempt in $(seq 1 $max_attempts); do
           echo "Attempt $attempt: Running command via SSH..."
-          if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=10 ubuntu@${EC2_IP} "$command"; then
+          if ssh -v -i ~/.ssh/ec2_key -o ConnectTimeout=10 ubuntu@${EC2_IP} "$command" 2>&1; then
             echo "Command executed successfully!"
             return 0
           fi
@@ -357,6 +368,10 @@ monitor:
         echo "Failed to execute command after $max_attempts attempts."
         return 1
       }
+      
+      # Test SSH connection first
+      echo "Testing SSH connection..."
+      run_ssh_command "echo 'SSH test successful'" || exit 1
       
       # Check Kubernetes cluster status
       echo "Checking Kubernetes cluster status..."

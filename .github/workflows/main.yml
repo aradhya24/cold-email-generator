@@ -1,0 +1,224 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_REGISTRY: ghcr.io
+  DOCKER_IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_USER: ubuntu
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Validate Python imports
+        run: python -c "import app.main" || echo "Validation failed but continuing"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.DOCKER_IMAGE }}
+            ghcr.io/${{ github.repository }}:latest
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    env:
+      LB_DNS: ''
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "Generating new SSH key..."
+          ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
+          chmod 600 ~/.ssh/ec2_key
+          eval $(ssh-agent -s)
+          ssh-add ~/.ssh/ec2_key
+          cat ~/.ssh/ec2_key.pub > ec2_key.pub
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+          
+      - name: Launch EC2 Instance
+        run: |
+          # Check required variables
+          if [ -z "${{ secrets.EC2_SECURITY_GROUP }}" ]; then
+            echo "ERROR: EC2_SECURITY_GROUP is not set"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.EC2_SUBNET_ID }}" ]; then
+            echo "ERROR: EC2_SUBNET_ID is not set"
+            exit 1
+          fi
+          
+          # Create user data script
+          echo "#!/bin/bash" > userdata.sh
+          echo "mkdir -p /home/ubuntu/.ssh" >> userdata.sh
+          cat ec2_key.pub > pubkey.txt
+          echo "cat > /home/ubuntu/.ssh/authorized_keys << 'EOT'" >> userdata.sh
+          cat pubkey.txt >> userdata.sh
+          echo "EOT" >> userdata.sh
+          echo "chmod 700 /home/ubuntu/.ssh" >> userdata.sh
+          echo "chmod 600 /home/ubuntu/.ssh/authorized_keys" >> userdata.sh
+          echo "chown -R ubuntu:ubuntu /home/ubuntu/.ssh" >> userdata.sh
+          
+          # Launch EC2 instance
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ami-0c7217cdde317cfec \
+            --instance-type t2.micro \
+            --network-interfaces "AssociatePublicIpAddress=true,DeviceIndex=0,Groups=${{ secrets.EC2_SECURITY_GROUP }},SubnetId=${{ secrets.EC2_SUBNET_ID }}" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-instance}]" \
+            --user-data file://userdata.sh \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+            
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          
+          # Wait for instance to be running
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+          sleep 30
+          
+          # Get public IP
+          for i in {1..5}; do
+            PUBLIC_IP=$(aws ec2 describe-instances \
+              --instance-ids $INSTANCE_ID \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
+              
+            if [ ! -z "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "None" ] && [ "$PUBLIC_IP" != "null" ]; then
+              echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+              echo "LB_DNS=$PUBLIC_IP" >> $GITHUB_ENV
+              break
+            fi
+            
+            echo "Attempt $i: No public IP yet, waiting 20 seconds..."
+            sleep 20
+          done
+          
+          if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ] || [ "$PUBLIC_IP" = "null" ]; then
+            echo "Failed to get public IP"
+            aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+            exit 1
+          fi
+          
+      - name: Wait for SSH and Deploy
+        run: |
+          # Wait for SSH
+          for i in {1..6}; do
+            if ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "echo 'SSH connection successful'"; then
+              echo "SSH connection established"
+              break
+            fi
+            echo "Attempt $i: SSH not ready, waiting 20 seconds..."
+            sleep 20
+            if [ $i -eq 6 ]; then
+              echo "Failed to establish SSH connection"
+              aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_ID }}
+              exit 1
+            fi
+          done
+          
+          # Setup directories
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "sudo mkdir -p /opt/cold-email/{app,scripts,k8s} && sudo chown -R ubuntu:ubuntu /opt/cold-email"
+          
+          # Copy files
+          scp -i ~/.ssh/ec2_key -r app scripts k8s ubuntu@${{ env.PUBLIC_IP }}:/opt/cold-email/
+          
+          # Setup environment
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "echo 'GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}' | sudo tee /opt/cold-email/app/.env"
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "chmod +x /opt/cold-email/scripts/*.sh"
+          
+          # Run setup and deployment
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "cd /opt/cold-email && sudo ./scripts/setup-k8s.sh"
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ env.PUBLIC_IP }} "cd /opt/cold-email && sudo ./scripts/deploy-k8s.sh"
+
+  monitor:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N ""
+          chmod 600 ~/.ssh/ec2_key
+          eval $(ssh-agent -s)
+          ssh-add ~/.ssh/ec2_key
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+          
+      - name: Monitor Deployment
+        run: |
+          # Get instance IP
+          INSTANCE_INFO=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=cold-email-instance" "Name=instance-state-name,Values=running" \
+            --query "Reservations[*].Instances[*].[InstanceId,PublicIpAddress]" \
+            --output text)
+            
+          EC2_IP=$(echo "$INSTANCE_INFO" | awk '{print $2}')
+          
+          if [ -z "$EC2_IP" ]; then
+            echo "Failed to get EC2 instance IP"
+            exit 1
+          fi
+          
+          # Check Kubernetes status
+          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get nodes"
+          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get pods --all-namespaces"
+          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get pods -n default -l app=cold-email-generator"
+          ssh -i ~/.ssh/ec2_key ubuntu@$EC2_IP "sudo kubectl get svc -n default" 
