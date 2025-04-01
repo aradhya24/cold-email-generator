@@ -67,7 +67,7 @@ deploy_setup:
     # Check security group
     - SECURITY_GROUP_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
     - echo "Instance $INSTANCE_ID is using security group $SECURITY_GROUP_ID"
-    - AWS_QUERY="SecurityGroups[0].IpPermissions[?FromPort==22]"
+    - AWS_QUERY="SecurityGroups[0].IpPermissions[?FromPort==\`22\`]"
     - SSH_RULE_EXISTS=$(aws ec2 describe-security-groups --group-ids $SECURITY_GROUP_ID --query "$AWS_QUERY" --output text)
     - if [ -z "$SSH_RULE_EXISTS" ]; then
     -   echo "Adding SSH rule to security group"
