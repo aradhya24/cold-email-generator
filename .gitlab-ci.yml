@@ -97,18 +97,19 @@ deploy:
         exit 1
       fi
       
-      # Launch instance with our public key as user data
-      USER_DATA=$(cat <<EOF
-#!/bin/bash
-mkdir -p /home/ubuntu/.ssh
-echo "$(cat ec2_key.pub)" >> /home/ubuntu/.ssh/authorized_keys
-chmod 700 /home/ubuntu/.ssh
-chmod 600 /home/ubuntu/.ssh/authorized_keys
-chown -R ubuntu:ubuntu /home/ubuntu/.ssh
-EOF
-)
+      # Launch instance with a simple user data script
+      echo "#!/bin/bash" > userdata.sh
+      echo "mkdir -p /home/ubuntu/.ssh" >> userdata.sh
+      cat ec2_key.pub > pubkey.txt
+      echo "cat > /home/ubuntu/.ssh/authorized_keys << 'EOT'" >> userdata.sh
+      cat pubkey.txt >> userdata.sh
+      echo "EOT" >> userdata.sh
+      echo "chmod 700 /home/ubuntu/.ssh" >> userdata.sh
+      echo "chmod 600 /home/ubuntu/.ssh/authorized_keys" >> userdata.sh
+      echo "chown -R ubuntu:ubuntu /home/ubuntu/.ssh" >> userdata.sh
       
-      ENCODED_USER_DATA=$(echo "$USER_DATA" | base64)
+      echo "User data script contents:"
+      cat userdata.sh
       
       INSTANCE_ID=$(aws ec2 run-instances \
         --region us-east-1 \
@@ -116,7 +117,7 @@ EOF
         --instance-type t2.micro \
         --network-interfaces "AssociatePublicIpAddress=true,DeviceIndex=0,Groups=$EC2_SECURITY_GROUP,SubnetId=$EC2_SUBNET_ID" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cold-email-instance}]" \
-        --user-data "$ENCODED_USER_DATA" \
+        --user-data file://userdata.sh \
         --query 'Instances[0].InstanceId' \
         --output text)
       
