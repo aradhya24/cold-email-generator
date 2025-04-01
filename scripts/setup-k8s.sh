@@ -58,13 +58,13 @@ wait_for_apt
 sudo apt-get clean
 sudo rm -rf /var/lib/apt/lists/*
 
-# Set up repository properly
-echo "Setting up new Kubernetes repository..."
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+# Add Kubernetes repository key
+echo "Adding Kubernetes repository key..."
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
 
-# Add the Kubernetes repository
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+# Add Kubernetes repository
+echo "Adding Kubernetes repository..."
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
 # Update package lists
 echo "Updating package lists..."
@@ -72,11 +72,17 @@ wait_for_apt
 sudo apt-get update || (echo "Failed to update apt, retrying with different method" && \
     wait_for_apt && sudo apt-get update --fix-missing)
 
-# Install specific versions of Kubernetes components
+# Install latest available versions of Kubernetes components
 echo "Installing Kubernetes components..."
 wait_for_apt
-sudo apt-get install -y kubelet=1.29.0-00 kubeadm=1.29.0-00 kubectl=1.29.0-00
+sudo apt-get install -y kubelet kubeadm kubectl
 sudo apt-mark hold kubelet kubeadm kubectl
+
+# Get installed versions for logging
+echo "Installed Kubernetes versions:"
+kubelet --version
+kubeadm version
+kubectl version --client
 
 # Setup for Kubernetes (combine all setup steps)
 echo "Setting up Kubernetes prerequisites..."
@@ -107,15 +113,18 @@ fi
 
 # Initialize Kubernetes with proper version and bootstrap token
 echo "Initializing Kubernetes cluster..."
+KUBE_VERSION=$(kubeadm version -o short)
+echo "Using Kubernetes version: $KUBE_VERSION"
+
 sudo kubeadm init --pod-network-cidr=10.244.0.0/16 \
-    --kubernetes-version=v1.29.0 \
+    --kubernetes-version=$KUBE_VERSION \
     --ignore-preflight-errors=all \
     --token-ttl=0 \
     --token=abcdef.0123456789abcdef \
     --apiserver-advertise-address=$(hostname -i) || \
     (echo "First initialization attempt failed, trying alternative approach..." && \
      sudo kubeadm init --ignore-preflight-errors=all \
-     --kubernetes-version=v1.29.0 \
+     --kubernetes-version=$KUBE_VERSION \
      --token-ttl=0 \
      --token=abcdef.0123456789abcdef \
      --apiserver-advertise-address=$(hostname -i))
