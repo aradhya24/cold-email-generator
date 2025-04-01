@@ -67,15 +67,18 @@ deploy:
     - chmod 644 ~/.ssh/known_hosts
     - echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
     
+    # Configure AWS credentials and region
+    - export AWS_DEFAULT_REGION="us-east-1"
     - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
     - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
-    - aws configure set default.region us-east-1
+    - aws configure set region us-east-1
+    - aws configure set output json
     
     # Debug AWS configuration
     - echo "Verifying AWS configuration:"
     - aws configure list
     - echo "Testing AWS connection:"
-    - aws ec2 describe-regions --output text | head -1 || echo "AWS connection failed"
+    - aws ec2 describe-regions --region us-east-1 --output text | head -1 || echo "AWS connection failed"
   script:
     - |
       # Launch EC2 instance and get instance info
@@ -111,32 +114,43 @@ deploy:
         --query 'Instances[0].InstanceId' \
         --output text)
       
+      if [ -z "$INSTANCE_ID" ]; then
+        echo "Failed to launch EC2 instance."
+        exit 1
+      fi
+      
       echo "Instance ID: $INSTANCE_ID"
       
       # Wait for instance to be running
       echo "Waiting for instance to be running..."
       aws ec2 wait instance-running --region us-east-1 --instance-ids $INSTANCE_ID
       
-      # Get public IP with retries
+      # Additional wait for instance to fully initialize
+      echo "Instance is running. Waiting 30 seconds for full initialization..."
+      sleep 30
+      
+      # Get public IP with retries and longer wait times
       echo "Getting instance public IP..."
-      for i in {1..5}; do
+      for i in 1 2 3 4 5; do
         PUBLIC_IP=$(aws ec2 describe-instances \
           --region us-east-1 \
           --instance-ids $INSTANCE_ID \
           --query 'Reservations[0].Instances[0].PublicIpAddress' \
           --output text)
         
-        if [ ! -z "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "None" ]; then
+        if [ ! -z "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "None" ] && [ "$PUBLIC_IP" != "null" ]; then
           echo "Got public IP: $PUBLIC_IP"
           break
         fi
         
-        echo "Attempt $i: No public IP yet, waiting..."
-        sleep 10
+        echo "Attempt $i: No public IP yet, waiting 20 seconds..."
+        sleep 20
       done
       
-      if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ]; then
+      if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ] || [ "$PUBLIC_IP" = "null" ]; then
         echo "Failed to get public IP after 5 attempts"
+        echo "Terminating instance $INSTANCE_ID to avoid unnecessary charges"
+        aws ec2 terminate-instances --region us-east-1 --instance-ids $INSTANCE_ID
         exit 1
       fi
       
@@ -147,13 +161,19 @@ deploy:
       
       # Wait for SSH to be available
       echo "Waiting for SSH to become available..."
-      for i in {1..5}; do
-        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"; then
+      for i in 1 2 3 4 5 6; do
+        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"; then
           echo "SSH connection established"
           break
         fi
-        echo "Attempt $i: SSH not ready yet, waiting..."
-        sleep 15
+        echo "Attempt $i: SSH not ready yet, waiting 20 seconds..."
+        sleep 20
+        if [ $i -eq 6 ]; then
+          echo "Failed to establish SSH connection after 6 attempts"
+          echo "Terminating instance $INSTANCE_ID to avoid unnecessary charges"
+          aws ec2 terminate-instances --region us-east-1 --instance-ids $INSTANCE_ID
+          exit 1
+        fi
       done
       
       # Create necessary directories
