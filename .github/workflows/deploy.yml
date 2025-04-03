@@ -206,13 +206,10 @@ jobs:
 
   deploy:
     name: Deploy Application
-    needs: [build, check-infra, infra-setup]
-    # Only run if infrastructure exists or was successfully set up
-    if: |
+    needs: [build, check-infra]
+    if: >-
       always() && 
-      (needs.infra-setup.result == 'success' || 
-      (needs.check-infra.outputs.infra_exists == 'true' && 
-       github.event.inputs.setup_infrastructure != 'true'))
+      (needs.check-infra.result == 'success' && needs.check-infra.outputs.infra_exists == 'true')
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -291,9 +288,57 @@ jobs:
           ssh ${AWS_USER}@${EC2_IP} "export DOCKER_IMAGE=${DOCKER_IMAGE} && export LB_DNS=${LB_DNS} && ~/k8s-deploy.sh"
           echo "Application deployed successfully"
 
+  infra-deploy:
+    name: Deploy to Infrastructure
+    needs: [infra-setup]
+    if: success()
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+      
+      - name: Find healthy EC2 instance
+        run: |
+          chmod +x deploy/aws-k8s/get-healthy-instance.sh
+          EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh)
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "Using EC2 instance with IP $EC2_IP for deployment"
+      
+      - name: Get load balancer DNS
+        run: |
+          LB_DNS=$(aws elbv2 describe-load-balancers \
+            --names ${APP_NAME}-lb \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+          echo "Load balancer DNS: $LB_DNS"
+      
+      - name: Deploy application
+        run: |
+          echo "Deploying application to Kubernetes after infrastructure setup..."
+          ssh ${AWS_USER}@${EC2_IP} "export DOCKER_IMAGE=${DOCKER_IMAGE} && export LB_DNS=${LB_DNS} && ~/k8s-deploy.sh"
+          echo "Application deployed successfully"
+
   monitor:
     name: Monitor Deployment
-    needs: deploy
+    needs: [deploy, infra-deploy]
+    if: always() && (success('deploy') || success('infra-deploy'))
     runs-on: ubuntu-latest
     environment: production
     steps:
