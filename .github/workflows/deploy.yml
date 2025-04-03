@@ -101,9 +101,29 @@ jobs:
           cd deploy/aws-k8s
           ./aws-infrastructure.sh
       
+      - name: Wait for instances to be ready
+        run: |
+          echo "Waiting for instances to be ready..."
+          sleep 60  # Give time for instances to be registered
+          
       - name: Find healthy EC2 instance
         run: |
           chmod +x deploy/aws-k8s/get-healthy-instance.sh
+          # Check if ASG exists and has instances
+          ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "length(AutoScalingGroups)" --output text || echo "0")
+          
+          if [ "$ASG_EXISTS" == "0" ]; then
+            echo "Auto Scaling Group ${APP_NAME}-asg does not exist or has no instances"
+            exit 1
+          fi
+          
+          INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "AutoScalingGroups[0].Instances | length(@)" --output text)
+          
+          if [ "$INSTANCE_COUNT" == "0" ]; then
+            echo "No instances found in Auto Scaling Group ${APP_NAME}-asg"
+            exit 1
+          fi
+          
           EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh)
           echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
           echo "Using EC2 instance with IP $EC2_IP for deployment"
@@ -115,10 +135,30 @@ jobs:
           ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-setup.sh ~/k8s-deploy.sh"
           ssh ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && ~/k8s-setup.sh"
           echo "Kubernetes setup completed"
+      
+      # Add a verification step
+      - name: Verify infrastructure
+        run: |
+          echo "Verifying AWS infrastructure..."
+          # Verify Auto Scaling Group
+          aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg
+          # Verify Load Balancer
+          aws elbv2 describe-load-balancers --names ${APP_NAME}-lb
+          
+          # Store LB_DNS as an output
+          LB_DNS=$(aws elbv2 describe-load-balancers \
+            --names ${APP_NAME}-lb \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+          echo "Load balancer DNS: $LB_DNS"
 
   deploy:
     name: Deploy Application
-    needs: build
+    # Change this to depend on both build and infra-setup
+    needs: [build, infra-setup]
+    # Only run if infra-setup is successful or if it's not a workflow_dispatch event
+    if: always() && (needs.infra-setup.result == 'success' || github.event_name != 'workflow_dispatch')
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -140,19 +180,54 @@ jobs:
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
           echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
       
+      - name: Verify auto-scaling group exists
+        run: |
+          # Check if ASG exists
+          ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "length(AutoScalingGroups)" --output text || echo "0")
+          
+          if [ "$ASG_EXISTS" == "0" ]; then
+            echo "ERROR: Auto Scaling Group ${APP_NAME}-asg does not exist. You need to run the infra-setup job first."
+            exit 1
+          fi
+      
       - name: Find healthy EC2 instance
         run: |
           chmod +x deploy/aws-k8s/get-healthy-instance.sh
-          EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh)
-          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-          echo "Using EC2 instance with IP $EC2_IP for deployment"
+          
+          # Try multiple times to find a healthy instance
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i to find a healthy instance..."
+            EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh || echo "")
+            
+            if [ ! -z "$EC2_IP" ]; then
+              echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+              echo "Found healthy instance with IP $EC2_IP"
+              break
+            fi
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Failed to find a healthy instance after $MAX_RETRIES attempts"
+              echo "Please ensure that the infrastructure setup has been completed."
+              exit 1
+            fi
+            
+            echo "Waiting 30 seconds before next attempt..."
+            sleep 30
+          done
       
       - name: Get load balancer DNS
         run: |
           LB_DNS=$(aws elbv2 describe-load-balancers \
             --names ${APP_NAME}-lb \
             --query 'LoadBalancers[0].DNSName' \
-            --output text)
+            --output text || echo "")
+            
+          if [ -z "$LB_DNS" ]; then
+            echo "ERROR: Load balancer ${APP_NAME}-lb not found. Infrastructure setup may be incomplete."
+            exit 1
+          fi
+          
           echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
           echo "Load balancer DNS: $LB_DNS"
       

@@ -42,6 +42,11 @@ for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
       --query "Reservations[0].Instances[0].PublicIpAddress" \
       --output text)
     
+    if [ -z "$IP" ] || [ "$IP" == "None" ] || [ "$IP" == "null" ]; then
+      echo "No public IP found for instance $INSTANCE_ID."
+      continue
+    fi
+    
     echo "Public IP: $IP"
     
     # Try to connect via SSH
