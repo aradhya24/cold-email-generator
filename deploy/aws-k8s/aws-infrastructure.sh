@@ -308,9 +308,12 @@ if [ "$ROLE_EXISTS" == "true" ]; then
   fi
   
   # Check if instance profile exists
-  PROFILE_EXISTS=$(aws iam list-instance-profiles-for-role --role-name $ROLE_NAME --query "length(InstanceProfiles)" --output text 2>/dev/null || echo "0")
+  PROFILE_EXISTS=$(aws iam list-instance-profiles-for-role \
+    --role-name $ROLE_NAME \
+    --query "InstanceProfiles[0].InstanceProfileName" \
+    --output text 2>/dev/null || echo "")
   
-  if [ "$PROFILE_EXISTS" == "0" ]; then
+  if [ -z "$PROFILE_EXISTS" ] || [ "$PROFILE_EXISTS" == "None" ]; then
     echo "No instance profile found for role, creating one..."
     aws iam create-instance-profile --instance-profile-name $ROLE_NAME > /dev/null || echo "Failed to create instance profile, but continuing"
     
@@ -323,7 +326,7 @@ if [ "$ROLE_EXISTS" == "true" ]; then
     echo "Waiting for instance profile to be available..."
     sleep 10
   else
-    echo "Instance profile already exists for role"
+    echo "Instance profile '$PROFILE_EXISTS' already exists and has the role attached"
   fi
 else
   # Create the role
@@ -365,28 +368,43 @@ else
     --role-name $ROLE_NAME \
     --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess || echo "Failed to attach EC2 policy, but continuing"
   
-  # Create instance profile
-  echo "Creating instance profile..."
-  aws iam create-instance-profile --instance-profile-name $ROLE_NAME > /dev/null || {
-    echo "Failed to create instance profile, checking if it already exists..."
-    PROFILE_CHECK=$(aws iam get-instance-profile --instance-profile-name $ROLE_NAME 2>/dev/null && echo "true" || echo "false")
-    if [ "$PROFILE_CHECK" == "false" ]; then
-      echo "WARNING: Could not create instance profile. Will try to continue anyway."
+  # Check if instance profile exists
+  PROFILE_EXISTS=$(aws iam get-instance-profile \
+    --instance-profile-name $ROLE_NAME 2>/dev/null && echo "true" || echo "false")
+  
+  if [ "$PROFILE_EXISTS" == "false" ]; then
+    # Create instance profile
+    echo "Creating instance profile..."
+    aws iam create-instance-profile --instance-profile-name $ROLE_NAME > /dev/null || echo "Failed to create instance profile, but continuing"
+    
+    # Add role to instance profile
+    echo "Adding role to instance profile..."
+    aws iam add-role-to-instance-profile \
+      --instance-profile-name $ROLE_NAME \
+      --role-name $ROLE_NAME || echo "Failed to add role to instance profile, but continuing"
+  else
+    echo "Instance profile already exists, checking if role is attached..."
+    
+    # Check if the role is already attached to the instance profile
+    ROLE_ATTACHED=$(aws iam list-instance-profiles-for-role \
+      --role-name $ROLE_NAME \
+      --query "length(InstanceProfiles)" \
+      --output text 2>/dev/null || echo "0")
+    
+    if [ "$ROLE_ATTACHED" == "0" ]; then
+      echo "Role is not attached to instance profile, attaching now..."
+      aws iam add-role-to-instance-profile \
+        --instance-profile-name $ROLE_NAME \
+        --role-name $ROLE_NAME 2>/dev/null || echo "Failed to add role to instance profile, likely already at limit"
     else
-      echo "Instance profile exists despite error, continuing..."
+      echo "Role is already attached to instance profile"
     fi
-  }
-  
-  # Add role to instance profile
-  echo "Adding role to instance profile..."
-  aws iam add-role-to-instance-profile \
-    --instance-profile-name $ROLE_NAME \
-    --role-name $ROLE_NAME || echo "Failed to add role to instance profile, but continuing"
-  
-  # Wait for the instance profile to be fully available
-  echo "Waiting for instance profile to be available..."
-  sleep 20
+  fi
 fi
+
+# Wait for the instance profile to be fully available
+echo "Waiting for instance profile to be available..."
+sleep 5
 
 # Get instance profile ARN with retry and fallback
 echo "Getting instance profile ARN..."
