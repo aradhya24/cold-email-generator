@@ -46,51 +46,226 @@ fi
 
 # Step 1: Create VPC and networking components
 echo "Creating VPC..."
-VPC_ID=$(aws ec2 create-vpc --cidr-block $VPC_CIDR \
-  --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=${APP_NAME}-vpc}]" \
-  --query 'Vpc.VpcId' --output text)
-aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
+
+# Check if VPC with the same name tag already exists
+EXISTING_VPC_ID=$(aws ec2 describe-vpcs \
+  --filters "Name=tag:Name,Values=${APP_NAME}-vpc" \
+  --query "Vpcs[0].VpcId" \
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$EXISTING_VPC_ID" ] || [ "$EXISTING_VPC_ID" == "None" ]; then
+  echo "Creating new VPC..."
+  VPC_ID=$(aws ec2 create-vpc --cidr-block $VPC_CIDR \
+    --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=${APP_NAME}-vpc}]" \
+    --query 'Vpc.VpcId' --output text)
+  aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
+else
+  echo "Using existing VPC: $EXISTING_VPC_ID"
+  VPC_ID=$EXISTING_VPC_ID
+fi
 
 echo "Creating public subnets..."
-PUBLIC_SUBNET_1=$(aws ec2 create-subnet --vpc-id $VPC_ID \
-  --cidr-block $PUBLIC_SUBNET_1_CIDR --availability-zone ${AWS_REGION}a \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${APP_NAME}-public-1}]" \
-  --query 'Subnet.SubnetId' --output text)
-PUBLIC_SUBNET_2=$(aws ec2 create-subnet --vpc-id $VPC_ID \
-  --cidr-block $PUBLIC_SUBNET_2_CIDR --availability-zone ${AWS_REGION}b \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${APP_NAME}-public-2}]" \
-  --query 'Subnet.SubnetId' --output text)
+
+# Check if subnets already exist
+EXISTING_SUBNET_1=$(aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=${APP_NAME}-public-1" \
+  --query "Subnets[0].SubnetId" \
+  --output text 2>/dev/null || echo "")
+
+EXISTING_SUBNET_2=$(aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=${APP_NAME}-public-2" \
+  --query "Subnets[0].SubnetId" \
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$EXISTING_SUBNET_1" ] || [ "$EXISTING_SUBNET_1" == "None" ]; then
+  echo "Creating subnet 1..."
+  PUBLIC_SUBNET_1=$(aws ec2 create-subnet --vpc-id $VPC_ID \
+    --cidr-block $PUBLIC_SUBNET_1_CIDR --availability-zone ${AWS_REGION}a \
+    --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${APP_NAME}-public-1}]" \
+    --query 'Subnet.SubnetId' --output text)
+else
+  echo "Using existing subnet 1: $EXISTING_SUBNET_1"
+  PUBLIC_SUBNET_1=$EXISTING_SUBNET_1
+fi
+
+if [ -z "$EXISTING_SUBNET_2" ] || [ "$EXISTING_SUBNET_2" == "None" ]; then
+  echo "Creating subnet 2..."
+  PUBLIC_SUBNET_2=$(aws ec2 create-subnet --vpc-id $VPC_ID \
+    --cidr-block $PUBLIC_SUBNET_2_CIDR --availability-zone ${AWS_REGION}b \
+    --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${APP_NAME}-public-2}]" \
+    --query 'Subnet.SubnetId' --output text)
+else
+  echo "Using existing subnet 2: $EXISTING_SUBNET_2"
+  PUBLIC_SUBNET_2=$EXISTING_SUBNET_2
+fi
 
 echo "Setting up internet access..."
-IGW_ID=$(aws ec2 create-internet-gateway \
-  --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=${APP_NAME}-igw}]" \
-  --query 'InternetGateway.InternetGatewayId' --output text)
-aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
 
-PUBLIC_RTB=$(aws ec2 create-route-table --vpc-id $VPC_ID \
-  --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${APP_NAME}-public-rtb}]" \
-  --query 'RouteTable.RouteTableId' --output text)
-aws ec2 create-route --route-table-id $PUBLIC_RTB --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
-aws ec2 associate-route-table --route-table-id $PUBLIC_RTB --subnet-id $PUBLIC_SUBNET_1
-aws ec2 associate-route-table --route-table-id $PUBLIC_RTB --subnet-id $PUBLIC_SUBNET_2
+# Check if internet gateway exists
+EXISTING_IGW=$(aws ec2 describe-internet-gateways \
+  --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+  --query "InternetGateways[0].InternetGatewayId" \
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$EXISTING_IGW" ] || [ "$EXISTING_IGW" == "None" ]; then
+  echo "Creating internet gateway..."
+  IGW_ID=$(aws ec2 create-internet-gateway \
+    --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=${APP_NAME}-igw}]" \
+    --query 'InternetGateway.InternetGatewayId' --output text)
+  
+  echo "Attaching internet gateway to VPC..."
+  aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+else
+  echo "Using existing internet gateway: $EXISTING_IGW"
+  IGW_ID=$EXISTING_IGW
+fi
+
+# Check if route table exists
+EXISTING_RTB=$(aws ec2 describe-route-tables \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=${APP_NAME}-public-rtb" \
+  --query "RouteTables[0].RouteTableId" \
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$EXISTING_RTB" ] || [ "$EXISTING_RTB" == "None" ]; then
+  echo "Creating route table..."
+  PUBLIC_RTB=$(aws ec2 create-route-table --vpc-id $VPC_ID \
+    --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${APP_NAME}-public-rtb}]" \
+    --query 'RouteTable.RouteTableId' --output text)
+  
+  echo "Creating route to internet gateway..."
+  aws ec2 create-route --route-table-id $PUBLIC_RTB --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID || \
+    echo "Route already exists or couldn't be created"
+else
+  echo "Using existing route table: $EXISTING_RTB"
+  PUBLIC_RTB=$EXISTING_RTB
+  
+  # Check if route to internet gateway exists
+  ROUTE_EXISTS=$(aws ec2 describe-route-tables \
+    --route-table-ids $PUBLIC_RTB \
+    --query "RouteTables[0].Routes[?DestinationCidrBlock=='0.0.0.0/0'].GatewayId" \
+    --output text 2>/dev/null || echo "")
+  
+  if [ -z "$ROUTE_EXISTS" ] || [ "$ROUTE_EXISTS" == "None" ]; then
+    echo "Creating route to internet gateway..."
+    aws ec2 create-route --route-table-id $PUBLIC_RTB --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID || \
+      echo "Route couldn't be created"
+  else
+    echo "Route to internet gateway already exists"
+  fi
+fi
+
+# Check subnet 1 route table association
+SUBNET1_ASSOCIATED=$(aws ec2 describe-route-tables \
+  --route-table-ids $PUBLIC_RTB \
+  --query "RouteTables[0].Associations[?SubnetId=='$PUBLIC_SUBNET_1'].RouteTableAssociationId" \
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$SUBNET1_ASSOCIATED" ] || [ "$SUBNET1_ASSOCIATED" == "None" ]; then
+  echo "Associating subnet 1 with route table..."
+  aws ec2 associate-route-table --route-table-id $PUBLIC_RTB --subnet-id $PUBLIC_SUBNET_1 || \
+    echo "Subnet 1 association failed or already exists"
+else
+  echo "Subnet 1 already associated with route table"
+fi
+
+# Check subnet 2 route table association
+SUBNET2_ASSOCIATED=$(aws ec2 describe-route-tables \
+  --route-table-ids $PUBLIC_RTB \
+  --query "RouteTables[0].Associations[?SubnetId=='$PUBLIC_SUBNET_2'].RouteTableAssociationId" \
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$SUBNET2_ASSOCIATED" ] || [ "$SUBNET2_ASSOCIATED" == "None" ]; then
+  echo "Associating subnet 2 with route table..."
+  aws ec2 associate-route-table --route-table-id $PUBLIC_RTB --subnet-id $PUBLIC_SUBNET_2 || \
+    echo "Subnet 2 association failed or already exists"
+else
+  echo "Subnet 2 already associated with route table"
+fi
 
 # Step 2: Create security group
 echo "Creating security group..."
-EC2_SG=$(aws ec2 create-security-group \
-  --group-name ${APP_NAME}-ec2-sg \
-  --description "Security group for EC2 instances running K8s" \
-  --vpc-id $VPC_ID \
-  --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${APP_NAME}-ec2-sg}]" \
-  --query 'GroupId' --output text)
 
-echo "Configuring security group rules..."
-# Allow SSH from anywhere for GitHub Actions to connect
-aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 22 --cidr 0.0.0.0/0
-aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 80 --cidr 0.0.0.0/0
-aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 443 --cidr 0.0.0.0/0
-aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 8501 --cidr 0.0.0.0/0
-aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 6443 --cidr 0.0.0.0/0
-aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol all --source-group $EC2_SG
+# Check if security group already exists
+EXISTING_SG=$(aws ec2 describe-security-groups \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=${APP_NAME}-ec2-sg" \
+  --query "SecurityGroups[0].GroupId" \
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$EXISTING_SG" ] || [ "$EXISTING_SG" == "None" ]; then
+  echo "Creating new security group..."
+  EC2_SG=$(aws ec2 create-security-group \
+    --group-name ${APP_NAME}-ec2-sg \
+    --description "Security group for EC2 instances running K8s" \
+    --vpc-id $VPC_ID \
+    --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${APP_NAME}-ec2-sg}]" \
+    --query 'GroupId' --output text)
+  
+  echo "Configuring security group rules..."
+  # Allow SSH from anywhere for GitHub Actions to connect
+  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 22 --cidr 0.0.0.0/0
+  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 80 --cidr 0.0.0.0/0
+  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 443 --cidr 0.0.0.0/0
+  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 8501 --cidr 0.0.0.0/0
+  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 6443 --cidr 0.0.0.0/0
+  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol all --source-group $EC2_SG
+else
+  echo "Using existing security group: $EXISTING_SG"
+  EC2_SG=$EXISTING_SG
+  
+  # Ensure security group has the necessary rules
+  echo "Ensuring security group has necessary rules..."
+  
+  # Function to check if rule exists and add if not
+  ensure_sg_rule() {
+    local port=$1
+    local cidr=$2
+    local proto=$3
+    
+    # Check if rule exists
+    RULE_EXISTS=$(aws ec2 describe-security-groups \
+      --group-ids $EC2_SG \
+      --filters "Name=ip-permission.from-port,Values=$port" \
+              "Name=ip-permission.to-port,Values=$port" \
+              "Name=ip-permission.cidr,Values=$cidr" \
+              "Name=ip-permission.protocol,Values=$proto" \
+      --query "SecurityGroups[0].IpPermissions[?FromPort==\`$port\` && ToPort==\`$port\`].IpRanges[?CidrIp==\`$cidr\`].CidrIp" \
+      --output text 2>/dev/null || echo "")
+    
+    if [ -z "$RULE_EXISTS" ] || [ "$RULE_EXISTS" == "None" ]; then
+      echo "Adding $proto rule for port $port from $cidr..."
+      aws ec2 authorize-security-group-ingress \
+        --group-id $EC2_SG \
+        --protocol $proto \
+        --port $port \
+        --cidr $cidr 2>/dev/null || echo "Rule already exists or couldn't be added"
+    else
+      echo "Rule for port $port from $cidr already exists"
+    fi
+  }
+  
+  # Add required rules
+  ensure_sg_rule 22 "0.0.0.0/0" "tcp"
+  ensure_sg_rule 80 "0.0.0.0/0" "tcp"
+  ensure_sg_rule 443 "0.0.0.0/0" "tcp"
+  ensure_sg_rule 8501 "0.0.0.0/0" "tcp"
+  ensure_sg_rule 6443 "0.0.0.0/0" "tcp"
+  
+  # Check for self-referencing rule (allowing all traffic within the security group)
+  SELF_RULE_EXISTS=$(aws ec2 describe-security-groups \
+    --group-ids $EC2_SG \
+    --query "SecurityGroups[0].IpPermissions[?UserIdGroupPairs[?GroupId==\`$EC2_SG\`]].UserIdGroupPairs[?GroupId==\`$EC2_SG\`].GroupId" \
+    --output text 2>/dev/null || echo "")
+  
+  if [ -z "$SELF_RULE_EXISTS" ] || [ "$SELF_RULE_EXISTS" == "None" ]; then
+    echo "Adding self-referencing rule..."
+    aws ec2 authorize-security-group-ingress \
+      --group-id $EC2_SG \
+      --protocol all \
+      --source-group $EC2_SG 2>/dev/null || echo "Self-referencing rule already exists or couldn't be added"
+  else
+    echo "Self-referencing rule already exists"
+  fi
+fi
 
 # Step 3: Create IAM role for SSM access
 echo "Creating IAM role for EC2 instances to use SSM..."
@@ -397,100 +572,210 @@ echo "======================================"
 EOF
 )
 
-aws ec2 create-launch-template \
-  --launch-template-name ${APP_NAME}-launch-template \
-  --version-description "Initial version with K8s pre-installed" \
-  --launch-template-data "{
-    \"ImageId\": \"$AMI_ID\",
-    \"InstanceType\": \"$EC2_TYPE\",
-    \"KeyName\": \"$KEY_NAME\",
-    \"IamInstanceProfile\": {
-      \"Arn\": \"$INSTANCE_PROFILE_ARN\"
-    },
-    \"NetworkInterfaces\": [
-      {
-        \"DeviceIndex\": 0,
-        \"AssociatePublicIpAddress\": true,
-        \"Groups\": [\"$EC2_SG\"],
-        \"DeleteOnTermination\": true
-      }
-    ],
-    \"BlockDeviceMappings\": [
-      {
-        \"DeviceName\": \"/dev/sda1\",
-        \"Ebs\": {
-          \"VolumeSize\": 8,
-          \"VolumeType\": \"gp2\",
+# Check if launch template already exists
+LAUNCH_TEMPLATE_EXISTS=$(aws ec2 describe-launch-templates \
+  --launch-template-names ${APP_NAME}-launch-template 2>/dev/null && echo "true" || echo "false")
+
+if [ "$LAUNCH_TEMPLATE_EXISTS" == "true" ]; then
+  echo "Launch template already exists, creating a new version..."
+  
+  # Create a new version of the existing launch template
+  aws ec2 create-launch-template-version \
+    --launch-template-name ${APP_NAME}-launch-template \
+    --version-description "Updated version with K8s pre-installed" \
+    --source-version '$Latest' \
+    --launch-template-data "{
+      \"ImageId\": \"$AMI_ID\",
+      \"InstanceType\": \"$EC2_TYPE\",
+      \"KeyName\": \"$KEY_NAME\",
+      \"IamInstanceProfile\": {
+        \"Arn\": \"$INSTANCE_PROFILE_ARN\"
+      },
+      \"UserData\": \"$ENCODED_USER_DATA\"
+    }"
+  
+  # Set the new version as default
+  aws ec2 modify-launch-template \
+    --launch-template-name ${APP_NAME}-launch-template \
+    --default-version '$Latest'
+  
+  echo "Launch template updated to new version."
+else
+  # Create new launch template
+  aws ec2 create-launch-template \
+    --launch-template-name ${APP_NAME}-launch-template \
+    --version-description "Initial version with K8s pre-installed" \
+    --launch-template-data "{
+      \"ImageId\": \"$AMI_ID\",
+      \"InstanceType\": \"$EC2_TYPE\",
+      \"KeyName\": \"$KEY_NAME\",
+      \"IamInstanceProfile\": {
+        \"Arn\": \"$INSTANCE_PROFILE_ARN\"
+      },
+      \"NetworkInterfaces\": [
+        {
+          \"DeviceIndex\": 0,
+          \"AssociatePublicIpAddress\": true,
+          \"Groups\": [\"$EC2_SG\"],
           \"DeleteOnTermination\": true
         }
-      }
-    ],
-    \"UserData\": \"$ENCODED_USER_DATA\",
-    \"TagSpecifications\": [
-      {
-        \"ResourceType\": \"instance\",
-        \"Tags\": [
-          {
-            \"Key\": \"Name\",
-            \"Value\": \"${APP_NAME}-k8s-node\"
+      ],
+      \"BlockDeviceMappings\": [
+        {
+          \"DeviceName\": \"/dev/sda1\",
+          \"Ebs\": {
+            \"VolumeSize\": 8,
+            \"VolumeType\": \"gp2\",
+            \"DeleteOnTermination\": true
           }
-        ]
-      }
-    ]
-  }"
+        }
+      ],
+      \"UserData\": \"$ENCODED_USER_DATA\",
+      \"TagSpecifications\": [
+        {
+          \"ResourceType\": \"instance\",
+          \"Tags\": [
+            {
+              \"Key\": \"Name\",
+              \"Value\": \"${APP_NAME}-k8s-node\"
+            }
+          ]
+        }
+      ]
+    }"
+fi
 
 # Step 5: Create a load balancer and target group
 echo "Creating target group..."
-TG_ARN=$(aws elbv2 create-target-group \
-  --name ${APP_NAME}-tg \
-  --protocol HTTP \
-  --port 8501 \
-  --vpc-id $VPC_ID \
-  --health-check-path "/_stcore/health" \
-  --health-check-interval-seconds 30 \
-  --health-check-timeout-seconds 5 \
-  --healthy-threshold-count 2 \
-  --unhealthy-threshold-count 2 \
-  --target-type instance \
+
+# Check if target group already exists
+TG_ARN=$(aws elbv2 describe-target-groups \
+  --names ${APP_NAME}-tg \
   --query 'TargetGroups[0].TargetGroupArn' \
-  --output text)
+  --output text 2>/dev/null || echo "")
+
+if [ -z "$TG_ARN" ] || [ "$TG_ARN" == "None" ]; then
+  echo "Creating new target group..."
+  TG_ARN=$(aws elbv2 create-target-group \
+    --name ${APP_NAME}-tg \
+    --protocol HTTP \
+    --port 8501 \
+    --vpc-id $VPC_ID \
+    --health-check-path "/_stcore/health" \
+    --health-check-interval-seconds 30 \
+    --health-check-timeout-seconds 5 \
+    --healthy-threshold-count 2 \
+    --unhealthy-threshold-count 2 \
+    --target-type instance \
+    --query 'TargetGroups[0].TargetGroupArn' \
+    --output text)
+else
+  echo "Target group already exists, using existing one: $TG_ARN"
+fi
 
 echo "Creating application load balancer..."
-LB_ARN=$(aws elbv2 create-load-balancer \
-  --name ${APP_NAME}-lb \
-  --subnets $PUBLIC_SUBNET_1 $PUBLIC_SUBNET_2 \
-  --security-groups $EC2_SG \
+
+# Check if load balancer already exists
+LB_ARN=$(aws elbv2 describe-load-balancers \
+  --names ${APP_NAME}-lb \
   --query 'LoadBalancers[0].LoadBalancerArn' \
-  --output text)
+  --output text 2>/dev/null || echo "")
 
-# Get the load balancer DNS name for later use
-LB_DNS=$(aws elbv2 describe-load-balancers \
-  --load-balancer-arns $LB_ARN \
-  --query 'LoadBalancers[0].DNSName' \
-  --output text)
+if [ -z "$LB_ARN" ] || [ "$LB_ARN" == "None" ]; then
+  echo "Creating new load balancer..."
+  LB_ARN=$(aws elbv2 create-load-balancer \
+    --name ${APP_NAME}-lb \
+    --subnets $PUBLIC_SUBNET_1 $PUBLIC_SUBNET_2 \
+    --security-groups $EC2_SG \
+    --query 'LoadBalancers[0].LoadBalancerArn' \
+    --output text)
+  
+  # Get the load balancer DNS name for later use
+  LB_DNS=$(aws elbv2 describe-load-balancers \
+    --load-balancer-arns $LB_ARN \
+    --query 'LoadBalancers[0].DNSName' \
+    --output text)
+  
+  echo "Creating ALB listener..."
+  LISTENER_ARN=$(aws elbv2 create-listener \
+    --load-balancer-arn $LB_ARN \
+    --protocol HTTP \
+    --port 80 \
+    --default-actions Type=forward,TargetGroupArn=$TG_ARN \
+    --query 'Listeners[0].ListenerArn' \
+    --output text)
+else
+  echo "Load balancer already exists, using existing one: $LB_ARN"
+  
+  # Get the load balancer DNS name for later use
+  LB_DNS=$(aws elbv2 describe-load-balancers \
+    --load-balancer-arns $LB_ARN \
+    --query 'LoadBalancers[0].DNSName' \
+    --output text)
+  
+  # Check if listener already exists
+  LISTENER_ARN=$(aws elbv2 describe-listeners \
+    --load-balancer-arn $LB_ARN \
+    --query 'Listeners[0].ListenerArn' \
+    --output text 2>/dev/null || echo "")
+  
+  if [ -z "$LISTENER_ARN" ] || [ "$LISTENER_ARN" == "None" ]; then
+    echo "Creating ALB listener..."
+    LISTENER_ARN=$(aws elbv2 create-listener \
+      --load-balancer-arn $LB_ARN \
+      --protocol HTTP \
+      --port 80 \
+      --default-actions Type=forward,TargetGroupArn=$TG_ARN \
+      --query 'Listeners[0].ListenerArn' \
+      --output text)
+  else
+    echo "Listener already exists, updating default actions..."
+    aws elbv2 modify-listener \
+      --listener-arn $LISTENER_ARN \
+      --default-actions Type=forward,TargetGroupArn=$TG_ARN > /dev/null
+  fi
+fi
+
 echo "Load balancer DNS: $LB_DNS"
-
-echo "Creating ALB listener..."
-LISTENER_ARN=$(aws elbv2 create-listener \
-  --load-balancer-arn $LB_ARN \
-  --protocol HTTP \
-  --port 80 \
-  --default-actions Type=forward,TargetGroupArn=$TG_ARN \
-  --query 'Listeners[0].ListenerArn' \
-  --output text)
 
 # Step 6: Create auto scaling group
 echo "Creating auto scaling group..."
-aws autoscaling create-auto-scaling-group \
-  --auto-scaling-group-name ${APP_NAME}-asg \
-  --launch-template LaunchTemplateName=${APP_NAME}-launch-template,Version='$Latest' \
-  --min-size 1 \
-  --max-size 2 \
-  --desired-capacity 1 \
-  --vpc-zone-identifier "$PUBLIC_SUBNET_1,$PUBLIC_SUBNET_2" \
-  --target-group-arns $TG_ARN \
-  --health-check-type ELB \
-  --health-check-grace-period 300
+
+# Check if auto scaling group already exists
+ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names ${APP_NAME}-asg \
+  --query "length(AutoScalingGroups)" \
+  --output text 2>/dev/null || echo "0")
+
+if [ "$ASG_EXISTS" != "0" ]; then
+  echo "Auto scaling group already exists, updating configuration..."
+  
+  # Update auto scaling group
+  aws autoscaling update-auto-scaling-group \
+    --auto-scaling-group-name ${APP_NAME}-asg \
+    --launch-template LaunchTemplateName=${APP_NAME}-launch-template,Version='$Latest' \
+    --min-size 1 \
+    --max-size 2 \
+    --desired-capacity 1 \
+    --vpc-zone-identifier "$PUBLIC_SUBNET_1,$PUBLIC_SUBNET_2" \
+    --target-group-arns $TG_ARN \
+    --health-check-type ELB \
+    --health-check-grace-period 300
+  
+  echo "Auto scaling group updated."
+else
+  # Create new auto scaling group
+  aws autoscaling create-auto-scaling-group \
+    --auto-scaling-group-name ${APP_NAME}-asg \
+    --launch-template LaunchTemplateName=${APP_NAME}-launch-template,Version='$Latest' \
+    --min-size 1 \
+    --max-size 2 \
+    --desired-capacity 1 \
+    --vpc-zone-identifier "$PUBLIC_SUBNET_1,$PUBLIC_SUBNET_2" \
+    --target-group-arns $TG_ARN \
+    --health-check-type ELB \
+    --health-check-grace-period 300
+fi
 
 # Step 7: Create scaling policies
 echo "Setting up auto scaling policies..."
