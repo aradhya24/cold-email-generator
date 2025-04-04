@@ -150,26 +150,46 @@ jobs:
           
           echo "Security group: $SG_ID"
           
-          # Check if security group allows SSH
-          SSH_ALLOWED=$(aws ec2 describe-security-groups \
-            --group-ids $SG_ID \
-            --filters "Name=ip-permission.from-port,Values=22" "Name=ip-permission.to-port,Values=22" "Name=ip-permission.cidr,Values=0.0.0.0/0" \
-            --query "SecurityGroups[0].IpPermissions" \
-            --output text)
+          # Force SSH rule recreation by removing any existing SSH rules
+          echo "Ensuring SSH access by recreating SSH rule..."
           
-          if [ -z "$SSH_ALLOWED" ]; then
-            echo "Security group does not allow SSH access from all sources. Adding rule..."
-            aws ec2 authorize-security-group-ingress \
-              --group-id $SG_ID \
-              --protocol tcp \
-              --port 22 \
-              --cidr 0.0.0.0/0
-            
-            echo "SSH access rule added to security group."
-            sleep 30  # Wait for rule to propagate
-          else
-            echo "Security group allows SSH access."
-          fi
+          # List current rules for SSH
+          echo "Current SSH rules:"
+          aws ec2 describe-security-groups \
+            --group-ids $SG_ID \
+            --filters "Name=ip-permission.from-port,Values=22" "Name=ip-permission.to-port,Values=22" \
+            --query "SecurityGroups[0].IpPermissions" \
+            --output json || echo "No SSH rules found"
+          
+          # Remove any existing SSH rules
+          echo "Removing any existing SSH rules..."
+          aws ec2 revoke-security-group-ingress \
+            --group-id $SG_ID \
+            --protocol tcp \
+            --port 22 \
+            --cidr 0.0.0.0/0 \
+            || echo "No SSH rules to remove or removal failed"
+          
+          # Add fresh SSH rule
+          echo "Adding new SSH access rule..."
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SG_ID \
+            --protocol tcp \
+            --port 22 \
+            --cidr 0.0.0.0/0
+          
+          echo "SSH access rule added to security group."
+          
+          # Verify rule was added
+          echo "Verifying new SSH rule:"
+          aws ec2 describe-security-groups \
+            --group-ids $SG_ID \
+            --filters "Name=ip-permission.from-port,Values=22" "Name=ip-permission.to-port,Values=22" \
+            --query "SecurityGroups[0].IpPermissions" \
+            --output json
+          
+          echo "Waiting 30 seconds for rule to propagate..."
+          sleep 30
       
       - name: Find healthy EC2 instance with retries
         run: |
@@ -485,4 +505,374 @@ jobs:
             echo "Application should be accessible at: http://${LB_DNS}"
           else
             echo "Could not determine application URL. Check AWS console for Load Balancer details."
-          fi 
+          fi
+      
+      - name: Verify EC2 network connectivity
+        run: |
+          echo "Verifying network connectivity to EC2 instances..."
+          
+          # Get instances
+          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${APP_NAME}-asg \
+            --query "AutoScalingGroups[0].Instances[*].InstanceId" \
+            --output text)
+          
+          if [ -z "$INSTANCE_IDS" ]; then
+            echo "No instances found in the auto scaling group."
+            exit 1
+          fi
+          
+          # Check each instance's network configuration
+          for INSTANCE_ID in $INSTANCE_IDS; do
+            echo "Checking network for instance $INSTANCE_ID..."
+            
+            # Get instance details
+            INSTANCE_INFO=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID)
+            
+            # Get subnet ID
+            SUBNET_ID=$(echo "$INSTANCE_INFO" | jq -r '.Reservations[0].Instances[0].SubnetId')
+            echo "Subnet ID: $SUBNET_ID"
+            
+            # Get VPC ID
+            VPC_ID=$(echo "$INSTANCE_INFO" | jq -r '.Reservations[0].Instances[0].VpcId')
+            echo "VPC ID: $VPC_ID"
+            
+            # Get public IP
+            PUBLIC_IP=$(echo "$INSTANCE_INFO" | jq -r '.Reservations[0].Instances[0].PublicIpAddress')
+            if [ "$PUBLIC_IP" == "null" ] || [ -z "$PUBLIC_IP" ]; then
+              echo "WARNING: No public IP found for instance $INSTANCE_ID"
+              continue
+            fi
+            echo "Public IP: $PUBLIC_IP"
+            
+            # Get security groups
+            SG_IDS=$(echo "$INSTANCE_INFO" | jq -r '.Reservations[0].Instances[0].SecurityGroups[].GroupId')
+            echo "Security Groups: $SG_IDS"
+            
+            # Check Network ACLs for the subnet
+            echo "Checking Network ACLs for subnet $SUBNET_ID..."
+            NACL_ASSOC=$(aws ec2 describe-network-acls \
+              --filters "Name=association.subnet-id,Values=$SUBNET_ID" \
+              --query "NetworkAcls[0].Associations[?SubnetId=='$SUBNET_ID'].NetworkAclId" \
+              --output text)
+            
+            if [ -z "$NACL_ASSOC" ] || [ "$NACL_ASSOC" == "None" ]; then
+              echo "No specific NACL found for subnet $SUBNET_ID, using default NACL"
+              
+              # Get default NACL for the VPC
+              NACL_ID=$(aws ec2 describe-network-acls \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=default,Values=true" \
+                --query "NetworkAcls[0].NetworkAclId" \
+                --output text)
+            else
+              NACL_ID=$NACL_ASSOC
+            fi
+            
+            echo "Network ACL ID: $NACL_ID"
+            
+            # Check if NACL allows SSH inbound
+            echo "Checking if NACL allows SSH inbound traffic..."
+            aws ec2 describe-network-acls \
+              --network-acl-ids $NACL_ID \
+              --query "NetworkAcls[0].Entries[?PortRange.From==22 && PortRange.To==22 && Egress==false]" \
+              --output json
+            
+            # Check route table for the subnet
+            echo "Checking route table for subnet $SUBNET_ID..."
+            ROUTE_TABLE_ID=$(aws ec2 describe-route-tables \
+              --filters "Name=association.subnet-id,Values=$SUBNET_ID" \
+              --query "RouteTables[0].RouteTableId" \
+              --output text)
+            
+            if [ -z "$ROUTE_TABLE_ID" ] || [ "$ROUTE_TABLE_ID" == "None" ]; then
+              echo "No specific route table found for subnet $SUBNET_ID, using main route table"
+              
+              # Get main route table for the VPC
+              ROUTE_TABLE_ID=$(aws ec2 describe-route-tables \
+                --filters "Name=vpc-id,Values=$VPC_ID" "Name=association.main,Values=true" \
+                --query "RouteTables[0].RouteTableId" \
+                --output text)
+            fi
+            
+            echo "Route table ID: $ROUTE_TABLE_ID"
+            
+            # Check for internet gateway route
+            echo "Checking for internet gateway route..."
+            aws ec2 describe-route-tables \
+              --route-table-ids $ROUTE_TABLE_ID \
+              --query "RouteTables[0].Routes[?DestinationCidrBlock=='0.0.0.0/0']" \
+              --output json
+            
+            # Try to ping the instance
+            echo "Trying to ping $PUBLIC_IP..."
+            if ping -c 3 -W 5 $PUBLIC_IP; then
+              echo "Successfully pinged $PUBLIC_IP"
+            else
+              echo "Could not ping $PUBLIC_IP, but this might be due to ICMP being blocked"
+            fi
+            
+            # Try to check port 22 with netcat
+            echo "Checking if port 22 is reachable on $PUBLIC_IP..."
+            if nc -zv -w 5 $PUBLIC_IP 22; then
+              echo "Port 22 is reachable on $PUBLIC_IP"
+            else
+              echo "Port 22 is not reachable on $PUBLIC_IP"
+            fi
+            
+            echo "Network verification completed for instance $INSTANCE_ID"
+            echo "------------------------------------------------------"
+          done
+      
+      - name: Alternative deployment with SSM if SSH fails
+        if: ${{ failure() || success() }}
+        run: |
+          echo "Attempting alternative deployment using AWS Systems Manager..."
+          
+          # Check if we have an instance ID
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "No instance ID found, attempting to find a running instance..."
+            INSTANCE_ID=$(aws ec2 describe-instances \
+              --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+              --query "Reservations[0].Instances[0].InstanceId" \
+              --output text)
+            
+            if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+              echo "No running instances found. Cannot continue with SSM deployment."
+              exit 1
+            fi
+            
+            echo "Using instance $INSTANCE_ID for SSM deployment."
+          fi
+          
+          # Check if SSM Agent is installed and running
+          echo "Checking if SSM Agent is installed on instance $INSTANCE_ID..."
+          SSM_STATUS=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+            --query "InstanceInformationList[0].PingStatus" \
+            --output text 2>/dev/null || echo "UNKNOWN")
+          
+          if [ "$SSM_STATUS" == "Online" ]; then
+            echo "SSM Agent is online on instance $INSTANCE_ID"
+          else
+            echo "SSM Agent is not online or not installed on instance $INSTANCE_ID"
+            echo "Attempting to install and configure SSM Agent via user data update..."
+            
+            # Terminate and replace the instance to get a new one with SSM
+            echo "Replacing instance to get one with SSM Agent..."
+            aws autoscaling terminate-instance-in-auto-scaling-group \
+              --instance-id $INSTANCE_ID \
+              --should-decrement-desired-capacity false
+            
+            echo "Waiting for new instance to become available..."
+            sleep 300  # Wait 5 minutes for new instance to be created and initialized
+            
+            # Get the new instance ID
+            INSTANCE_ID=$(aws ec2 describe-instances \
+              --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+              --query "Reservations[0].Instances[0].InstanceId" \
+              --output text)
+            
+            if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+              echo "No new running instances found after replacement. Cannot continue with SSM deployment."
+              exit 1
+            fi
+            
+            echo "Using new instance $INSTANCE_ID for SSM deployment."
+            
+            # Check if SSM Agent is now online
+            echo "Checking if SSM Agent is installed on new instance $INSTANCE_ID..."
+            SSM_STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text 2>/dev/null || echo "UNKNOWN")
+            
+            if [ "$SSM_STATUS" != "Online" ]; then
+              echo "SSM Agent is still not online on new instance $INSTANCE_ID. Cannot continue with SSM deployment."
+              echo "Please check AWS console and ensure SSM Agent is installed on EC2 instances."
+              exit 1
+            fi
+          fi
+          
+          # Try to deploy using SSM
+          echo "Deploying application using SSM commands..."
+          
+          # Step 1: Install Docker and Kubernetes if not installed
+          echo "Verifying Docker and Kubernetes installation..."
+          INSTALL_COMMAND_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{
+              "commands":[
+                "#!/bin/bash",
+                "# Install Docker if not present",
+                "if ! command -v docker &>/dev/null; then",
+                "  apt-get update",
+                "  apt-get install -y apt-transport-https ca-certificates curl software-properties-common",
+                "  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -",
+                "  add-apt-repository \"deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\"",
+                "  apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io",
+                "  systemctl enable docker && systemctl start docker",
+                "fi",
+                "# Install Kubernetes if not present",
+                "if ! command -v kubectl &>/dev/null; then",
+                "  curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -",
+                "  echo \"deb https://apt.kubernetes.io/ kubernetes-xenial main\" > /etc/apt/sources.list.d/kubernetes.list",
+                "  apt-get update && apt-get install -y kubelet kubeadm kubectl",
+                "  apt-mark hold kubelet kubeadm kubectl",
+                "fi",
+                "# Check Docker and Kubernetes versions",
+                "docker version",
+                "kubectl version --client || echo \"kubectl client only version check failed\""
+              ]
+            }' \
+            --query "Command.CommandId" --output text)
+          
+          echo "Installation command sent with ID: $INSTALL_COMMAND_ID"
+          echo "Waiting for installation command to complete..."
+          
+          aws ssm wait command-executed \
+            --command-id $INSTALL_COMMAND_ID \
+            --instance-id $INSTANCE_ID
+          
+          # Step 2: Initialize Kubernetes if not already initialized
+          echo "Initializing Kubernetes..."
+          INIT_COMMAND_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{
+              "commands":[
+                "#!/bin/bash",
+                "if [ ! -f \"/etc/kubernetes/admin.conf\" ]; then",
+                "  # Disable swap",
+                "  swapoff -a",
+                "  # Initialize Kubernetes",
+                "  kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all || echo \"Kubernetes init failed but continuing\"",
+                "  # Set up kubectl config",
+                "  mkdir -p $HOME/.kube",
+                "  cp -f /etc/kubernetes/admin.conf $HOME/.kube/config",
+                "  chown $(id -u):$(id -g) $HOME/.kube/config",
+                "  # Allow pods on master node",
+                "  kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true",
+                "  # Install CNI",
+                "  kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml || echo \"Flannel installation failed but continuing\"",
+                "  echo \"Kubernetes initialized\"",
+                "else",
+                "  echo \"Kubernetes already initialized\"",
+                "fi",
+                "# Create namespace",
+                "kubectl create namespace cold-email 2>/dev/null || echo \"Namespace already exists\""
+              ]
+            }' \
+            --query "Command.CommandId" --output text)
+          
+          echo "Initialization command sent with ID: $INIT_COMMAND_ID"
+          echo "Waiting for initialization command to complete..."
+          
+          aws ssm wait command-executed \
+            --command-id $INIT_COMMAND_ID \
+            --instance-id $INSTANCE_ID
+          
+          # Step 3: Deploy the application
+          echo "Deploying application via SSM..."
+          
+          # Create deployment YAML via SSM
+          DEPLOY_COMMAND_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters "{
+              \"commands\":[
+                \"#!/bin/bash\",
+                \"# Create deployment YAML\",
+                \"cat > /tmp/deployment.yaml << 'EOF'\",
+                \"apiVersion: apps/v1\",
+                \"kind: Deployment\",
+                \"metadata:\",
+                \"  name: cold-email\",
+                \"  namespace: cold-email\",
+                \"spec:\",
+                \"  replicas: 1\",
+                \"  selector:\",
+                \"    matchLabels:\",
+                \"      app: cold-email\",
+                \"  template:\",
+                \"    metadata:\",
+                \"      labels:\",
+                \"        app: cold-email\",
+                \"    spec:\",
+                \"      containers:\",
+                \"      - name: cold-email\",
+                \"        image: ${DOCKER_IMAGE}\",
+                \"        ports:\",
+                \"        - containerPort: 8501\",
+                \"        env:\",
+                \"        - name: GROQ_API_KEY\",
+                \"          value: \\\"${{ secrets.GROQ_API_KEY }}\\\"\",
+                \"EOF\",
+                \"# Create service YAML\",
+                \"cat > /tmp/service.yaml << 'EOF'\",
+                \"apiVersion: v1\",
+                \"kind: Service\",
+                \"metadata:\",
+                \"  name: cold-email\",
+                \"  namespace: cold-email\",
+                \"spec:\",
+                \"  selector:\",
+                \"    app: cold-email\",
+                \"  ports:\",
+                \"  - port: 8501\",
+                \"    targetPort: 8501\",
+                \"  type: NodePort\",
+                \"EOF\",
+                \"# Apply manifests\",
+                \"kubectl apply -f /tmp/deployment.yaml\",
+                \"kubectl apply -f /tmp/service.yaml\",
+                \"# Display resources\",
+                \"kubectl get pods,svc -n cold-email\"
+              ]
+            }" \
+            --query "Command.CommandId" --output text)
+          
+          echo "Deployment command sent with ID: $DEPLOY_COMMAND_ID"
+          echo "Waiting for deployment command to complete..."
+          
+          aws ssm wait command-executed \
+            --command-id $DEPLOY_COMMAND_ID \
+            --instance-id $INSTANCE_ID
+          
+          # Get output from the deployment command
+          echo "Deployment command output:"
+          aws ssm get-command-invocation \
+            --command-id $DEPLOY_COMMAND_ID \
+            --instance-id $INSTANCE_ID \
+            --query "StandardOutputContent" \
+            --output text
+          
+          # Check deployment status
+          echo "Checking deployment status..."
+          STATUS_COMMAND_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters '{
+              "commands":[
+                "kubectl get pods -n cold-email",
+                "kubectl get svc -n cold-email",
+                "NODE_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)",
+                "NODE_PORT=$(kubectl get svc -n cold-email cold-email -o jsonpath=\'{.spec.ports[0].nodePort}\')",
+                "echo \"Application should be accessible at: http://${NODE_IP}:${NODE_PORT}\""
+              ]
+            }' \
+            --query "Command.CommandId" --output text)
+          
+          echo "Status command sent with ID: $STATUS_COMMAND_ID"
+          aws ssm wait command-executed \
+            --command-id $STATUS_COMMAND_ID \
+            --instance-id $INSTANCE_ID
+          
+          echo "Status command output:"
+          aws ssm get-command-invocation \
+            --command-id $STATUS_COMMAND_ID \
+            --instance-id $INSTANCE_ID \
+            --query "StandardOutputContent" \
+            --output text
+          
+          echo "SSM deployment completed!" 

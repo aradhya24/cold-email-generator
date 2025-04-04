@@ -62,6 +62,18 @@ fi
 declare -A RUNNING_INSTANCES
 RUNNING_INSTANCE_COUNT=0
 
+# Show the SSH config and key permissions
+echo "SSH configuration:"
+echo "SSH key permissions:"
+ls -la ~/.ssh/id_rsa || echo "SSH key not found at ~/.ssh/id_rsa"
+cat ~/.ssh/config || echo "SSH config not found"
+
+# Try to fix SSH known hosts issues
+echo "Clearing any SSH known hosts entries that might cause issues..."
+> ~/.ssh/known_hosts
+echo "Adding GitHub to known hosts..."
+ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+
 for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
   echo "Checking instance $INSTANCE_ID..."
   
@@ -89,55 +101,80 @@ for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
     RUNNING_INSTANCES[$INSTANCE_ID]=$IP
     RUNNING_INSTANCE_COUNT=$((RUNNING_INSTANCE_COUNT + 1))
     
-    # Try ping first to see if network connectivity exists
+    # Get console output for debugging
+    echo "Getting console output for instance $INSTANCE_ID..."
+    aws ec2 get-console-output --instance-id $INSTANCE_ID | grep -A 20 "user-data" || echo "No relevant console output found"
+    
+    # Try to check if the instance has finished initializing
+    echo "Checking if user-data script has completed..."
+    if aws ssm get-command-invocation --command-id "$(aws ssm send-command \
+      --instance-ids $INSTANCE_ID \
+      --document-name "AWS-RunShellScript" \
+      --parameters '{"commands":["ls -la /tmp/user-data-complete"]}' \
+      --query "Command.CommandId" --output text 2>/dev/null)" \
+      --query "Status" --output text 2>/dev/null | grep -q "Success"; then
+      echo "Instance initialization complete! (verified through SSM)"
+    else
+      echo "Could not verify initialization through SSM (this is normal if SSM agent is not installed)"
+    fi
+    
+    # Try direct port connectivity check
+    echo "Testing TCP connectivity to port 22 on $IP..."
+    if nc -z -v -w10 $IP 22; then
+      echo "Port 22 is open and reachable on $IP"
+    else
+      echo "Port 22 is not reachable on $IP. SSH will likely fail."
+    fi
+    
+    # Try traceroute to the host to diagnose network issues
+    echo "Traceroute to $IP (max 10 hops):"
+    traceroute -m 10 -w 1 $IP || echo "Traceroute not available or failed"
+    
+    # Try ping before ssh
     echo "Testing network connectivity to $IP..."
-    if ping -c 1 -W 5 $IP > /dev/null 2>&1; then
+    if ping -c 3 -W 5 $IP > /dev/null 2>&1; then
       echo "Network connectivity confirmed to $IP"
     else
       echo "Warning: Cannot ping $IP, but this might be due to firewall rules."
     fi
     
-    # Try to connect via SSH with multiple tries
-    echo "Attempting SSH connection to verify instance health..."
+    # Try SSH with very verbose output for debugging
+    echo "Attempting connection with SSH debug output:"
+    ssh -v -v -v -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=no ubuntu@$IP echo "Debug connection test" || echo "Debug SSH connection failed"
     
-    # Multiple SSH connection attempts with different options
-    MAX_SSH_RETRIES=3
-    SSH_SUCCESS=false
+    # Try different SSH connection methods
+    echo "Attempting SSH connection with multiple methods..."
     
-    for i in $(seq 1 $MAX_SSH_RETRIES); do
-      echo "SSH attempt $i of $MAX_SSH_RETRIES..."
+    # First try with all users at once to save time
+    if timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no ubuntu@$IP echo "SSH connection successful as ubuntu" 2>/dev/null ||
+       timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no ec2-user@$IP echo "SSH connection successful as ec2-user" 2>/dev/null ||
+       timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no admin@$IP echo "SSH connection successful as admin" 2>/dev/null; then
       
-      if [ $i -eq 1 ]; then
-        # First attempt - normal connection
-        ssh -v -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@$IP echo "SSH connection successful" 2>/dev/null && SSH_SUCCESS=true
-      elif [ $i -eq 2 ]; then
-        # Second attempt - try with different user (ec2-user)
-        ssh -v -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no ec2-user@$IP echo "SSH connection successful" 2>/dev/null && SSH_SUCCESS=true
-      else
-        # Third attempt - try with root and longer timeout
-        ssh -v -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=no root@$IP echo "SSH connection successful" 2>/dev/null && SSH_SUCCESS=true
-      fi
+      echo "Found healthy instance $INSTANCE_ID with IP $IP (SSH verified)"
+      # Output only the IP to stdout
+      echo $IP >&3
       
-      if [ "$SSH_SUCCESS" = true ]; then
-        echo "Found healthy instance $INSTANCE_ID with IP $IP (SSH verified)"
-        # Output only the IP to stdout
-        echo $IP >&3
-        
-        # Store instance ID and IP for the workflow
-        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-        echo "EC2_IP=$IP" >> $GITHUB_ENV
-        exit 0
-      else
-        echo "SSH connection failed for instance $INSTANCE_ID on attempt $i."
-        
-        if [ $i -lt $MAX_SSH_RETRIES ]; then
-          echo "Waiting 10 seconds before next SSH attempt..."
-          sleep 10
-        fi
-      fi
-    done
+      # Store instance ID and IP for the workflow
+      echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+      echo "EC2_IP=$IP" >> $GITHUB_ENV
+      exit 0
+    else
+      echo "All quick SSH connections failed. Attempting detailed troubleshooting..."
+      
+      # Check SSH key is correctly formatted
+      echo "Checking SSH key format:"
+      ssh-keygen -l -f ~/.ssh/id_rsa || echo "SSH key verification failed"
+      
+      # Try telnet connection to port 22
+      echo "Attempting telnet connection to port 22:"
+      timeout 5 telnet $IP 22 || echo "Telnet connection failed"
+      
+      # Try curl to port 22
+      echo "Testing port 22 with curl:"
+      curl --connect-timeout 5 telnet://$IP:22 || echo "Curl connection test failed"
+    fi
     
-    echo "All SSH connection attempts failed for $INSTANCE_ID. Instance may not be ready for SSH yet."
+    echo "All SSH connection methods failed for $INSTANCE_ID."
   fi
 done
 

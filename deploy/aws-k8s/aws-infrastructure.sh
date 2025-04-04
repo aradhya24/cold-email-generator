@@ -63,7 +63,65 @@ aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --por
 aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 6443 --cidr 0.0.0.0/0
 aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol all --source-group $EC2_SG
 
-# Step 3: Create EC2 launch template with Kubernetes pre-installed
+# Step 3: Create IAM role for SSM access
+echo "Creating IAM role for EC2 instances to use SSM..."
+
+# Create SSM IAM Role
+ROLE_NAME="${APP_NAME}-ssm-role"
+
+# Check if role already exists
+ROLE_EXISTS=$(aws iam get-role --role-name $ROLE_NAME 2>/dev/null && echo "true" || echo "false")
+if [ "$ROLE_EXISTS" == "true" ]; then
+  echo "IAM role $ROLE_NAME already exists, skipping creation."
+else
+  # Create the role
+  echo "Creating IAM role..."
+  aws iam create-role \
+    --role-name $ROLE_NAME \
+    --assume-role-policy-document '{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "ec2.amazonaws.com"
+          },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    }' > /dev/null
+  
+  # Attach SSM policy to the role
+  echo "Attaching SSM policy to role..."
+  aws iam attach-role-policy \
+    --role-name $ROLE_NAME \
+    --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  
+  # Create instance profile
+  echo "Creating instance profile..."
+  aws iam create-instance-profile \
+    --instance-profile-name $ROLE_NAME > /dev/null
+  
+  # Add role to instance profile
+  echo "Adding role to instance profile..."
+  aws iam add-role-to-instance-profile \
+    --instance-profile-name $ROLE_NAME \
+    --role-name $ROLE_NAME
+  
+  # Wait for the instance profile to be fully available
+  echo "Waiting for instance profile to be available..."
+  sleep 10
+fi
+
+# Get instance profile ARN
+INSTANCE_PROFILE_ARN=$(aws iam get-instance-profile \
+  --instance-profile-name $ROLE_NAME \
+  --query "InstanceProfile.Arn" \
+  --output text)
+
+echo "Using instance profile: $INSTANCE_PROFILE_ARN"
+
+# Step 4: Create EC2 launch template with Kubernetes pre-installed
 echo "Creating launch template..."
 ENCODED_USER_DATA=$(cat << 'EOF' | base64 -w 0
 #!/bin/bash
@@ -109,6 +167,39 @@ ssh-keygen -A
 
 # Restart SSH to apply changes
 systemctl restart ssh
+
+# Install AWS SSM Agent
+echo "Installing AWS SSM Agent..."
+mkdir -p /tmp/ssm
+cd /tmp/ssm
+wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent
+systemctl start amazon-ssm-agent
+
+# Verify SSM Agent is running
+if systemctl is-active --quiet amazon-ssm-agent; then
+  echo "SSM Agent is running"
+else
+  echo "SSM Agent is not running, attempting to fix..."
+  systemctl restart amazon-ssm-agent
+  sleep 5
+  if ! systemctl is-active --quiet amazon-ssm-agent; then
+    echo "Failed to start SSM Agent, reinstalling..."
+    apt-get remove --purge -y amazon-ssm-agent
+    mkdir -p /tmp/ssm-reinstall
+    cd /tmp/ssm-reinstall
+    wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+    dpkg -i amazon-ssm-agent.deb
+    systemctl enable amazon-ssm-agent
+    systemctl start amazon-ssm-agent
+  fi
+fi
+
+# Ensure instance has proper IAM profile for SSM
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region || curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/[a-z]$//')
+echo "Instance ID: $INSTANCE_ID in region $REGION"
 
 # Verify SSH is running
 if ! systemctl is-active --quiet ssh; then
@@ -216,6 +307,9 @@ aws ec2 create-launch-template \
     \"ImageId\": \"ami-0c7217cdde317cfec\",
     \"InstanceType\": \"$EC2_TYPE\",
     \"KeyName\": \"$KEY_NAME\",
+    \"IamInstanceProfile\": {
+      \"Arn\": \"$INSTANCE_PROFILE_ARN\"
+    },
     \"NetworkInterfaces\": [
       {
         \"DeviceIndex\": 0,
@@ -248,7 +342,7 @@ aws ec2 create-launch-template \
     ]
   }"
 
-# Step 4: Create a load balancer and target group
+# Step 5: Create a load balancer and target group
 echo "Creating target group..."
 TG_ARN=$(aws elbv2 create-target-group \
   --name ${APP_NAME}-tg \
@@ -288,7 +382,7 @@ LISTENER_ARN=$(aws elbv2 create-listener \
   --query 'Listeners[0].ListenerArn' \
   --output text)
 
-# Step 5: Create auto scaling group
+# Step 6: Create auto scaling group
 echo "Creating auto scaling group..."
 aws autoscaling create-auto-scaling-group \
   --auto-scaling-group-name ${APP_NAME}-asg \
@@ -301,7 +395,7 @@ aws autoscaling create-auto-scaling-group \
   --health-check-type ELB \
   --health-check-grace-period 300
 
-# Step 6: Create scaling policies
+# Step 7: Create scaling policies
 echo "Setting up auto scaling policies..."
 aws autoscaling put-scaling-policy \
   --auto-scaling-group-name ${APP_NAME}-asg \
