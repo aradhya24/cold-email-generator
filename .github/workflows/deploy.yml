@@ -73,7 +73,7 @@ jobs:
           echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\tConnectTimeout 60\n\tServerAliveInterval 60\n\tServerAliveCountMax 10\n\n" > ~/.ssh/config
       
       - name: Set up infrastructure if needed or requested
         run: |
@@ -85,7 +85,7 @@ jobs:
             ./aws-infrastructure.sh
             cd ../..
             echo "Waiting for instances to be ready..."
-            sleep 120
+            sleep 180  # Longer wait to ensure instances are fully initialized
           else
             # Check if ASG exists
             ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "length(AutoScalingGroups)" --output text || echo "0")
@@ -96,69 +96,168 @@ jobs:
               ./aws-infrastructure.sh
               cd ../..
               echo "Waiting for instances to be ready..."
-              sleep 120
+              sleep 180  # Longer wait to ensure instances are fully initialized
             else
               echo "Infrastructure already exists, skipping setup."
             fi
           fi
       
-      - name: Find healthy EC2 instance
+      - name: Verify EC2 security group
+        run: |
+          echo "Verifying security groups for SSH access..."
+          
+          # Find instances in our ASG
+          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${APP_NAME}-asg \
+            --query "AutoScalingGroups[0].Instances[*].InstanceId" \
+            --output text)
+          
+          if [ -z "$INSTANCE_IDS" ]; then
+            echo "No instances found in the auto scaling group."
+            exit 1
+          fi
+          
+          # Get first instance ID
+          INSTANCE_ID=$(echo $INSTANCE_IDS | cut -d' ' -f1)
+          echo "Checking security group for instance $INSTANCE_ID"
+          
+          # Get security group ID for the instance
+          SG_ID=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
+            --output text)
+          
+          echo "Security group: $SG_ID"
+          
+          # Check if security group allows SSH
+          SSH_ALLOWED=$(aws ec2 describe-security-groups \
+            --group-ids $SG_ID \
+            --filters "Name=ip-permission.from-port,Values=22" "Name=ip-permission.to-port,Values=22" "Name=ip-permission.cidr,Values=0.0.0.0/0" \
+            --query "SecurityGroups[0].IpPermissions" \
+            --output text)
+          
+          if [ -z "$SSH_ALLOWED" ]; then
+            echo "Security group does not allow SSH access from all sources. Adding rule..."
+            aws ec2 authorize-security-group-ingress \
+              --group-id $SG_ID \
+              --protocol tcp \
+              --port 22 \
+              --cidr 0.0.0.0/0
+            
+            echo "SSH access rule added to security group."
+            sleep 30  # Wait for rule to propagate
+          else
+            echo "Security group allows SSH access."
+          fi
+      
+      - name: Find healthy EC2 instance with retries
         run: |
           chmod +x deploy/aws-k8s/get-healthy-instance.sh
           
           # Try multiple times to find a healthy instance
-          MAX_RETRIES=5
+          MAX_RETRIES=8
+          RETRY_SLEEP=30
           
           for i in $(seq 1 $MAX_RETRIES); do
-            echo "Attempt $i to find a healthy instance..."
+            echo "Attempt $i of $MAX_RETRIES to find a healthy instance..."
+            
+            # First, try get-healthy-instance.sh
             EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh || echo "")
             
             if [ ! -z "$EC2_IP" ]; then
               echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
               echo "Found healthy instance with IP $EC2_IP"
+              
+              # Verify we can actually connect to the instance
+              if ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes ${AWS_USER}@${EC2_IP} "echo SSH connection successful"; then
+                echo "SSH connection to $EC2_IP verified!"
+                break
+              else
+                echo "SSH connection to $EC2_IP failed despite the instance appearing healthy."
+                EC2_IP=""  # Reset to try another instance
+              fi
+            fi
+            
+            # If we're on the last retry, try a fallback approach
+            if [ $i -eq $MAX_RETRIES ] || [ -z "$EC2_IP" ]; then
+              echo "Trying to find any running instance as fallback..."
+              
+              # Get all running instances in the ASG
+              INSTANCE_IDS=$(aws ec2 describe-instances \
+                --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+                --query "Reservations[*].Instances[*].InstanceId" \
+                --output text)
+              
+              if [ ! -z "$INSTANCE_IDS" ]; then
+                for ID in $INSTANCE_IDS; do
+                  IP=$(aws ec2 describe-instances \
+                    --instance-ids $ID \
+                    --query "Reservations[0].Instances[0].PublicIpAddress" \
+                    --output text)
+                  
+                  if [ "$IP" != "None" ] && [ ! -z "$IP" ]; then
+                    echo "Trying instance $ID with IP $IP..."
+                    
+                    # Check if we can connect to this instance
+                    if ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes ${AWS_USER}@${IP} "echo SSH connection successful" 2>/dev/null; then
+                      echo "FALLBACK: Using instance $ID with IP $IP"
+                      echo "EC2_IP=$IP" >> $GITHUB_ENV
+                      EC2_IP=$IP
+                      break 2  # Break out of both loops
+                    else
+                      echo "SSH connection to $IP failed."
+                    fi
+                  fi
+                done
+              fi
+              
+              # If we've exhausted all options and still can't connect
+              if [ -z "$EC2_IP" ] && [ $i -eq $MAX_RETRIES ]; then
+                echo "Failed to find a healthy instance after all attempts"
+                echo "Showing ASG status:"
+                aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg
+                echo "Showing instance details:"
+                aws ec2 describe-instances --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg"
+                exit 1
+              fi
+            fi
+            
+            echo "Waiting $RETRY_SLEEP seconds before next attempt..."
+            sleep $RETRY_SLEEP
+          done
+          
+          # Final verification with detailed SSH diagnostics
+          echo "Final verification of SSH connection to $EC2_IP..."
+          ssh -v -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "echo SSH verification complete" || echo "Warning: SSH verification failed but continuing..."
+      
+      - name: Set up Kubernetes with retries
+        run: |
+          MAX_RETRIES=5
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i of $MAX_RETRIES to set up Kubernetes..."
+            
+            # Check if kubectl is already installed and namespace exists
+            if ssh -o ConnectTimeout=20 -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "command -v kubectl >/dev/null 2>&1 && kubectl get namespace ${APP_NAME} 2>/dev/null"; then
+              echo "Kubernetes already set up"
               break
             fi
             
-            if [ $i -eq $MAX_RETRIES ]; then
-              # Try a final alternative approach - get any running instance
-              echo "Trying to find any running instance as fallback..."
-              INSTANCE_ID=$(aws ec2 describe-instances \
-                --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
-                --query "Reservations[0].Instances[0].InstanceId" \
-                --output text)
-              
-              if [ "$INSTANCE_ID" != "None" ] && [ ! -z "$INSTANCE_ID" ]; then
-                EC2_IP=$(aws ec2 describe-instances \
-                  --instance-ids $INSTANCE_ID \
-                  --query "Reservations[0].Instances[0].PublicIpAddress" \
-                  --output text)
-                
-                if [ "$EC2_IP" != "None" ] && [ ! -z "$EC2_IP" ]; then
-                  echo "FALLBACK: Using instance $INSTANCE_ID with IP $EC2_IP"
-                  echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-                  break
-                fi
-              fi
-              
-              echo "Failed to find a healthy instance after all attempts"
-              exit 1
-            fi
-            
-            echo "Waiting 30 seconds before next attempt..."
-            sleep 30
-          done
-      
-      - name: Set up Kubernetes if needed
-        run: |
-          if ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${AWS_USER}@${EC2_IP} "kubectl get namespace ${APP_NAME} 2>/dev/null"; then
             echo "Setting up Kubernetes..."
-            scp -o StrictHostKeyChecking=no deploy/aws-k8s/k8s-setup.sh ${AWS_USER}@${EC2_IP}:~/
-            scp -o StrictHostKeyChecking=no deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/
-            ssh -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-setup.sh ~/k8s-deploy.sh"
-            ssh -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && ~/k8s-setup.sh"
-            echo "Kubernetes setup completed"
-          else
-            echo "Kubernetes already set up"
+            
+            # Copy and execute setup scripts with detailed output
+            scp -v -o ConnectTimeout=20 -o StrictHostKeyChecking=no deploy/aws-k8s/k8s-setup.sh ${AWS_USER}@${EC2_IP}:~/ || { echo "SCP failed on attempt $i"; sleep 30; continue; }
+            scp -v -o ConnectTimeout=20 -o StrictHostKeyChecking=no deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/ || { echo "SCP failed on attempt $i"; sleep 30; continue; }
+            
+            ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-setup.sh ~/k8s-deploy.sh" || { echo "SSH chmod failed on attempt $i"; sleep 30; continue; }
+            ssh -o ConnectTimeout=120 -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && ~/k8s-setup.sh" || { echo "Kubernetes setup failed on attempt $i"; sleep 30; continue; }
+            
+            echo "Kubernetes setup completed on attempt $i"
+            break
+          done
+          
+          if [ $i -eq $MAX_RETRIES ]; then
+            echo "Warning: Kubernetes setup may not have completed successfully after $MAX_RETRIES attempts. Will still try to deploy."
           fi
       
       - name: Get load balancer DNS
@@ -168,24 +267,56 @@ jobs:
             --query 'LoadBalancers[0].DNSName' \
             --output text)
           echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+          echo "Load balancer DNS: $LB_DNS"
       
       - name: Deploy application
         run: |
           echo "Deploying application to Kubernetes..."
-          scp -o StrictHostKeyChecking=no deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/ || true
-          ssh -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-deploy.sh" || true
-          ssh -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "export DOCKER_IMAGE=${DOCKER_IMAGE} && export LB_DNS=${LB_DNS} && ~/k8s-deploy.sh"
-          echo "Application deployed successfully"
+          
+          # Retry SCP if it fails
+          MAX_RETRIES=3
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Copying deployment script (attempt $i of $MAX_RETRIES)..."
+            scp -v -o ConnectTimeout=20 -o StrictHostKeyChecking=no deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/ && break
+            echo "SCP failed, retrying in 10 seconds..."
+            sleep 10
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Warning: Failed to copy deployment script after $MAX_RETRIES attempts. Continuing anyway, it may already be on the server."
+            fi
+          done
+          
+          # Retry the deployment command
+          MAX_RETRIES=3
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Running deployment (attempt $i of $MAX_RETRIES)..."
+            if ssh -o ConnectTimeout=60 -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-deploy.sh && export DOCKER_IMAGE=${DOCKER_IMAGE} && export LB_DNS=${LB_DNS} && ~/k8s-deploy.sh"; then
+              echo "Application deployed successfully on attempt $i"
+              break
+            fi
+            
+            echo "Deployment failed, retrying in 30 seconds..."
+            sleep 30
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Warning: Failed to deploy application after $MAX_RETRIES attempts. Will still try to monitor."
+            fi
+          done
       
       - name: Monitor deployment
         run: |
           echo "Checking Kubernetes deployment status..."
-          ssh -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "kubectl get pods -n ${APP_NAME}" || true
-          ssh -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "kubectl get svc -n ${APP_NAME}" || true
           
-          echo "Waiting for application to be fully available..."
-          sleep 60
+          # Give the deployment time to create resources
+          echo "Waiting 30 seconds for resources to be created..."
+          sleep 30
+          
+          ssh -o ConnectTimeout=20 -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "kubectl get pods -n ${APP_NAME}" || echo "Failed to get pods"
+          ssh -o ConnectTimeout=20 -o StrictHostKeyChecking=no ${AWS_USER}@${EC2_IP} "kubectl get svc -n ${APP_NAME}" || echo "Failed to get services"
+          
+          echo "Waiting 90 seconds for application to be fully available..."
+          sleep 90
           
           echo "Checking application health at http://${LB_DNS}/_stcore/health"
-          curl -s -f -m 10 "http://${LB_DNS}/_stcore/health" || echo "Health check failed, application may need more time to become available"
-          echo "Application is accessible at: http://${LB_DNS}" 
+          curl -s -f -m 30 "http://${LB_DNS}/_stcore/health" || echo "Health check failed, application may need more time to become available"
+          echo "Application should be accessible at: http://${LB_DNS}" 
