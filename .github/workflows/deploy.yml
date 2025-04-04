@@ -333,7 +333,7 @@ jobs:
   monitor:
     name: Monitor Deployment
     needs: [deploy-after-setup, deploy-to-existing]
-    if: always() && (success('deploy-after-setup') || success('deploy-to-existing'))
+    if: always() && (needs.deploy-after-setup.result == 'success' || needs.deploy-to-existing.result == 'success')
     runs-on: ubuntu-latest
     environment: production
     steps:

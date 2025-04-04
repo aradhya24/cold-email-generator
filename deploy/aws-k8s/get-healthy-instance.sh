@@ -6,7 +6,10 @@ set -e
 # App name
 APP_NAME="cold-email"
 
-# Get all instance IDs in the auto scaling group
+# Redirect all logs to stderr except the final IP
+exec 3>&1 # Save original stdout to file descriptor 3
+exec 1>&2 # Redirect stdout to stderr
+
 echo "Fetching instances from auto scaling group ${APP_NAME}-asg..."
 INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
   --auto-scaling-group-names ${APP_NAME}-asg \
@@ -53,7 +56,8 @@ for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
     echo "Attempting SSH connection to verify instance health..."
     if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no ubuntu@$IP exit 2>/dev/null; then
       echo "Found healthy instance $INSTANCE_ID with IP $IP"
-      echo $IP
+      # Output only the IP to stdout (file descriptor 3)
+      echo $IP >&3
       exit 0
     else
       echo "SSH connection failed for instance $INSTANCE_ID."
