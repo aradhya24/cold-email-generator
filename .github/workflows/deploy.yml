@@ -74,13 +74,43 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Setup infrastructure only when requested
-  setup:
-    name: Setup Infrastructure
+  # Check if infrastructure exists
+  check-infra:
+    name: Check Infrastructure
     needs: build
     runs-on: ubuntu-latest
     environment: production
-    if: github.event.inputs.setup_infrastructure == 'true' || github.event_name == 'workflow_dispatch'
+    outputs:
+      infra_exists: ${{ steps.check-asg.outputs.infra_exists }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Check if infrastructure exists
+        id: check-asg
+        run: |
+          ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "length(AutoScalingGroups)" --output text || echo "0")
+          if [ "$ASG_EXISTS" == "0" ]; then
+            echo "Infrastructure does not exist yet."
+            echo "infra_exists=false" >> $GITHUB_OUTPUT
+          else
+            echo "Infrastructure exists."
+            echo "infra_exists=true" >> $GITHUB_OUTPUT
+          fi
+
+  # Setup infrastructure only when requested
+  setup:
+    name: Setup Infrastructure
+    needs: [build, check-infra]
+    runs-on: ubuntu-latest
+    environment: production
+    if: |
+      (github.event.inputs.setup_infrastructure == 'true' && github.event_name == 'workflow_dispatch') || 
+      (needs.check-infra.outputs.infra_exists == 'false')
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -100,23 +130,15 @@ jobs:
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
           echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
       
-      - name: Create infrastructure if needed
+      - name: Create infrastructure
         run: |
-          # Check if ASG exists
-          ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "length(AutoScalingGroups)" --output text || echo "0")
+          echo "Creating AWS infrastructure..."
+          chmod +x deploy/aws-k8s/aws-infrastructure.sh
+          cd deploy/aws-k8s
+          ./aws-infrastructure.sh
           
-          # Only create if it doesn't exist
-          if [ "$ASG_EXISTS" == "0" ]; then
-            echo "Creating AWS infrastructure..."
-            chmod +x deploy/aws-k8s/aws-infrastructure.sh
-            cd deploy/aws-k8s
-            ./aws-infrastructure.sh
-            
-            echo "Waiting for instances to be ready..."
-            sleep 120
-          else
-            echo "Infrastructure already exists, skipping creation step."
-          fi
+          echo "Waiting for instances to be ready..."
+          sleep 120
       
       - name: Find healthy EC2 instance
         id: find-instance
@@ -145,21 +167,14 @@ jobs:
             sleep 30
           done
       
-      - name: Set up Kubernetes if needed
+      - name: Set up Kubernetes
         run: |
-          # Check if namespace exists
-          NAMESPACE_EXISTS=$(ssh ${AWS_USER}@${EC2_IP} "kubectl get namespace ${APP_NAME} 2>/dev/null || echo 'not found'")
-          
-          if [[ $NAMESPACE_EXISTS == *"not found"* ]]; then
-            echo "Setting up Kubernetes..."
-            scp deploy/aws-k8s/k8s-setup.sh ${AWS_USER}@${EC2_IP}:~/
-            scp deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/
-            ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-setup.sh ~/k8s-deploy.sh"
-            ssh ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && ~/k8s-setup.sh"
-            echo "Kubernetes setup completed"
-          else
-            echo "Kubernetes already set up, skipping..."
-          fi
+          echo "Setting up Kubernetes..."
+          scp deploy/aws-k8s/k8s-setup.sh ${AWS_USER}@${EC2_IP}:~/
+          scp deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/
+          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-setup.sh ~/k8s-deploy.sh"
+          ssh ${AWS_USER}@${EC2_IP} "export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && ~/k8s-setup.sh"
+          echo "Kubernetes setup completed"
       
       - name: Verify infrastructure
         run: |
@@ -182,9 +197,9 @@ jobs:
       LB_DNS: ${{ env.LB_DNS }}
 
   # Deploy the application to the infrastructure
-  deploy:
-    name: Deploy Application
-    needs: setup
+  deploy-after-setup:
+    name: Deploy After Setup
+    needs: [build, setup]
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -247,10 +262,78 @@ jobs:
           ssh ${AWS_USER}@${EC2_IP} "export DOCKER_IMAGE=${DOCKER_IMAGE} && export LB_DNS=${LB_DNS} && ~/k8s-deploy.sh"
           echo "Application deployed successfully"
 
+  # Deploy to existing infrastructure
+  deploy-to-existing:
+    name: Deploy to Existing Infrastructure
+    needs: [build, check-infra]
+    if: needs.check-infra.outputs.infra_exists == 'true' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+      
+      - name: Find healthy EC2 instance
+        run: |
+          chmod +x deploy/aws-k8s/get-healthy-instance.sh
+          
+          # Try multiple times to find a healthy instance
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i to find a healthy instance..."
+            EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh || echo "")
+            
+            if [ ! -z "$EC2_IP" ]; then
+              echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+              echo "Found healthy instance with IP $EC2_IP"
+              break
+            fi
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Failed to find a healthy instance after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            
+            echo "Waiting 30 seconds before next attempt..."
+            sleep 30
+          done
+      
+      - name: Get load balancer DNS
+        run: |
+          LB_DNS=$(aws elbv2 describe-load-balancers \
+            --names ${APP_NAME}-lb \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+      
+      - name: Deploy application
+        run: |
+          echo "Deploying application to existing Kubernetes cluster..."
+          scp deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/ || true
+          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-deploy.sh" || true
+          ssh ${AWS_USER}@${EC2_IP} "export DOCKER_IMAGE=${DOCKER_IMAGE} && export LB_DNS=${LB_DNS} && ~/k8s-deploy.sh"
+          echo "Application deployed successfully"
+
   # Monitor the deployment
   monitor:
     name: Monitor Deployment
-    needs: deploy
+    needs: [deploy-after-setup, deploy-to-existing]
+    if: always() && (success('deploy-after-setup') || success('deploy-to-existing'))
     runs-on: ubuntu-latest
     environment: production
     steps:
