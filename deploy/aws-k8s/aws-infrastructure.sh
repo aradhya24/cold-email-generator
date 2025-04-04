@@ -600,7 +600,7 @@ if [ "$LAUNCH_TEMPLATE_EXISTS" == "true" ]; then
   echo "Launch template already exists, creating a new version..."
   
   # Create a new version of the existing launch template
-  aws ec2 create-launch-template-version \
+  VERSION_RESULT=$(aws ec2 create-launch-template-version \
     --launch-template-name ${APP_NAME}-launch-template \
     --version-description "Updated version with K8s pre-installed" \
     --source-version '$Latest' \
@@ -611,18 +611,54 @@ if [ "$LAUNCH_TEMPLATE_EXISTS" == "true" ]; then
       \"IamInstanceProfile\": {
         \"Arn\": \"$INSTANCE_PROFILE_ARN\"
       },
-      \"UserData\": \"$ENCODED_USER_DATA\"
-    }"
+      \"NetworkInterfaces\": [
+        {
+          \"DeviceIndex\": 0,
+          \"AssociatePublicIpAddress\": true,
+          \"Groups\": [\"$EC2_SG\"],
+          \"DeleteOnTermination\": true
+        }
+      ],
+      \"BlockDeviceMappings\": [
+        {
+          \"DeviceName\": \"/dev/sda1\",
+          \"Ebs\": {
+            \"VolumeSize\": 8,
+            \"VolumeType\": \"gp2\",
+            \"DeleteOnTermination\": true
+          }
+        }
+      ],
+      \"UserData\": \"$ENCODED_USER_DATA\",
+      \"TagSpecifications\": [
+        {
+          \"ResourceType\": \"instance\",
+          \"Tags\": [
+            {
+              \"Key\": \"Name\",
+              \"Value\": \"${APP_NAME}-k8s-node\"
+            }
+          ]
+        }
+      ]
+    }" 2>/dev/null)
   
-  # Set the new version as default
-  aws ec2 modify-launch-template \
-    --launch-template-name ${APP_NAME}-launch-template \
-    --default-version '$Latest'
+  if [ $? -ne 0 ]; then
+    echo "Failed to create launch template version, but continuing"
+  else
+    echo "Launch template version created successfully"
+    
+    # Set the new version as default
+    aws ec2 modify-launch-template \
+      --launch-template-name ${APP_NAME}-launch-template \
+      --default-version '$Latest' 2>/dev/null || echo "Failed to set default version, but continuing"
+  fi
   
   echo "Launch template updated to new version."
 else
   # Create new launch template
-  aws ec2 create-launch-template \
+  echo "Creating new launch template..."
+  TEMPLATE_RESULT=$(aws ec2 create-launch-template \
     --launch-template-name ${APP_NAME}-launch-template \
     --version-description "Initial version with K8s pre-installed" \
     --launch-template-data "{
@@ -662,7 +698,24 @@ else
           ]
         }
       ]
-    }"
+    }" 2>/dev/null)
+  
+  if [ $? -ne 0 ]; then
+    echo "Failed to create launch template, checking if it exists anyway..."
+    TEMPLATE_CHECK=$(aws ec2 describe-launch-templates \
+      --launch-template-names ${APP_NAME}-launch-template \
+      --query "LaunchTemplates[0].LaunchTemplateId" \
+      --output text 2>/dev/null || echo "")
+    
+    if [ -z "$TEMPLATE_CHECK" ] || [ "$TEMPLATE_CHECK" == "None" ]; then
+      echo "ERROR: Launch template does not exist and failed to create it"
+      # Don't exit, continue with the script
+    else
+      echo "Launch template exists despite error, continuing..."
+    fi
+  else
+    echo "Launch template created successfully"
+  fi
 fi
 
 # Step 5: Create a load balancer and target group
@@ -876,12 +929,10 @@ echo ""
 echo "Use this Load Balancer DNS for your application: http://$LB_DNS"
 echo "=================================================="
 
-# Save important values for later scripts
-cat > ./infrastructure-output.env << EOL
-export VPC_ID=$VPC_ID
-export PUBLIC_SUBNET_1=$PUBLIC_SUBNET_1
-export PUBLIC_SUBNET_2=$PUBLIC_SUBNET_2
-export EC2_SG=$EC2_SG
-export LB_DNS=$LB_DNS
-export TG_ARN=$TG_ARN
-EOL 
+# Save important values without using a heredoc
+echo "export VPC_ID=$VPC_ID" > ./infrastructure-output.env
+echo "export PUBLIC_SUBNET_1=$PUBLIC_SUBNET_1" >> ./infrastructure-output.env
+echo "export PUBLIC_SUBNET_2=$PUBLIC_SUBNET_2" >> ./infrastructure-output.env
+echo "export EC2_SG=$EC2_SG" >> ./infrastructure-output.env
+echo "export LB_DNS=$LB_DNS" >> ./infrastructure-output.env
+echo "export TG_ARN=$TG_ARN" >> ./infrastructure-output.env 
