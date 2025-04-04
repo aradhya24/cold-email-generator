@@ -71,22 +71,91 @@ ENCODED_USER_DATA=$(cat << 'EOF' | base64 -w 0
 apt-get update && apt-get upgrade -y
 apt-get install -y apt-transport-https ca-certificates curl software-properties-common
 
-# Ensure SSH is properly configured
+# Ensure SSH is properly installed and configured first
+echo "Setting up SSH server..."
 apt-get install -y openssh-server
+
+# Create SSH directory structure if needed
+mkdir -p /root/.ssh /home/ubuntu/.ssh
+chmod 700 /root/.ssh /home/ubuntu/.ssh
+
+# Make sure the SSH service is enabled and started
 systemctl enable ssh
 systemctl start ssh
-echo "PermitRootLogin no" >> /etc/ssh/sshd_config
-echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
-echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
+
+# Configure SSH securely
+cat > /etc/ssh/sshd_config.d/secure-ssh.conf << 'EOSSH'
+# SSH Secure Configuration
+Port 22
+Protocol 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+LogLevel VERBOSE
+EOSSH
+
+# Generate SSH host keys if they don't exist
+ssh-keygen -A
+
+# Restart SSH to apply changes
 systemctl restart ssh
 
+# Verify SSH is running
+if ! systemctl is-active --quiet ssh; then
+  echo "SSH failed to start properly after configuration. Attempting to fix..."
+  apt-get remove --purge -y openssh-server
+  apt-get install -y openssh-server
+  systemctl enable ssh
+  systemctl start ssh
+fi
+
+# Set up SSH verification loop
+echo "Verifying SSH service is running properly..."
+MAX_RETRIES=5
+SSH_OK=false
+
+for i in $(seq 1 $MAX_RETRIES); do
+  if systemctl is-active --quiet ssh; then
+    echo "SSH service is running (attempt $i/$MAX_RETRIES)"
+    # Test SSH connection locally to verify it's accepting connections
+    if nc -z -w5 localhost 22; then
+      echo "SSH port is open and accepting connections"
+      SSH_OK=true
+      break
+    else
+      echo "SSH port is not responding despite service running"
+    fi
+  else
+    echo "SSH service is not running (attempt $i/$MAX_RETRIES)"
+    systemctl restart ssh
+  fi
+  sleep 10
+done
+
+if [ "$SSH_OK" = false ]; then
+  echo "WARNING: SSH verification failed after $MAX_RETRIES attempts"
+  # Continue anyway as this is just the user data script
+fi
+
 # Install Docker
+echo "Installing Docker..."
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
 add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
 apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io
 systemctl enable docker && systemctl start docker
 
 # Install Kubernetes components
+echo "Installing Kubernetes components..."
 curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
 cat << EOK > /etc/apt/sources.list.d/kubernetes.list
 deb https://apt.kubernetes.io/ kubernetes-xenial main
@@ -109,21 +178,34 @@ chown -R ubuntu:ubuntu /home/ubuntu/k8s /home/ubuntu/scripts
 # Add user to docker group
 usermod -aG docker ubuntu
 
-# Make sure SSH is working
-echo "SSH setup verification" > /tmp/ssh-verification
-for i in {1..5}; do
-  if systemctl is-active --quiet ssh; then
-    echo "SSH is running properly"
-    break
-  else
-    echo "Waiting for SSH to start properly..."
-    systemctl restart ssh
-    sleep 5
-  fi
-done
+# Set appropriate permissions for ubuntu user
+echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu
+chmod 440 /etc/sudoers.d/ubuntu
+
+# Copy the ubuntu user authorized_keys from the AWS launch
+if [ -f /home/ubuntu/.ssh/authorized_keys ]; then
+  cp /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+  chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+  chmod 600 /home/ubuntu/.ssh/authorized_keys
+fi
+
+# Make sure the ubuntu user can access Docker without sudo
+newgrp docker << ENDGROUP
+su - ubuntu -c "docker version"
+ENDGROUP
 
 # Signal that user-data script has completed
-touch /tmp/user-data-complete
+echo "User data script completed at $(date)" > /tmp/user-data-complete
+chmod 644 /tmp/user-data-complete
+
+# Final checks
+echo "====== FINAL ENVIRONMENT STATUS ======"
+systemctl status ssh --no-pager || true
+ss -tlnp | grep :22 || true
+ls -la /home/ubuntu/.ssh/
+echo "Ubuntu user in groups: $(groups ubuntu)"
+echo "======================================"
 EOF
 )
 
