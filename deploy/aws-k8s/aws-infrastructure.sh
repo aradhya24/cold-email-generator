@@ -55,7 +55,8 @@ EC2_SG=$(aws ec2 create-security-group \
   --query 'GroupId' --output text)
 
 echo "Configuring security group rules..."
-aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 22 --cidr $(curl -s https://checkip.amazonaws.com)/32
+# Allow SSH from anywhere for GitHub Actions to connect
+aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 22 --cidr 0.0.0.0/0
 aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 80 --cidr 0.0.0.0/0
 aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 443 --cidr 0.0.0.0/0
 aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 8501 --cidr 0.0.0.0/0
@@ -69,6 +70,17 @@ ENCODED_USER_DATA=$(cat << 'EOF' | base64 -w 0
 # Update system and install Docker
 apt-get update && apt-get upgrade -y
 apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+
+# Ensure SSH is properly configured
+apt-get install -y openssh-server
+systemctl enable ssh
+systemctl start ssh
+echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
+echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
+systemctl restart ssh
+
+# Install Docker
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
 add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
 apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io
@@ -96,6 +108,22 @@ chown -R ubuntu:ubuntu /home/ubuntu/k8s /home/ubuntu/scripts
 
 # Add user to docker group
 usermod -aG docker ubuntu
+
+# Make sure SSH is working
+echo "SSH setup verification" > /tmp/ssh-verification
+for i in {1..5}; do
+  if systemctl is-active --quiet ssh; then
+    echo "SSH is running properly"
+    break
+  else
+    echo "Waiting for SSH to start properly..."
+    systemctl restart ssh
+    sleep 5
+  fi
+done
+
+# Signal that user-data script has completed
+touch /tmp/user-data-complete
 EOF
 )
 

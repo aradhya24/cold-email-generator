@@ -26,7 +26,10 @@ fi
 read -ra INSTANCE_ARRAY <<< "$INSTANCE_IDS"
 echo "Found ${#INSTANCE_ARRAY[@]} instances in the auto scaling group."
 
-# Check each instance
+# Find any running instance first (we'll use this as a fallback)
+FALLBACK_IP=""
+FALLBACK_ID=""
+
 for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
   echo "Checking instance $INSTANCE_ID..."
   
@@ -52,28 +55,22 @@ for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
     
     echo "Public IP: $IP"
     
-    # Try to connect via SSH with more debugging and retries
+    # Save as fallback
+    if [ -z "$FALLBACK_IP" ]; then
+      FALLBACK_IP=$IP
+      FALLBACK_ID=$INSTANCE_ID
+      echo "Saved instance $FALLBACK_ID with IP $FALLBACK_IP as fallback"
+    fi
+    
+    # Try to connect via SSH with multiple tries
     echo "Attempting SSH connection to verify instance health..."
     
     # Multiple SSH connection attempts
-    MAX_SSH_RETRIES=3
+    MAX_SSH_RETRIES=2
     for i in $(seq 1 $MAX_SSH_RETRIES); do
       echo "SSH attempt $i of $MAX_SSH_RETRIES..."
       
-      # Print instance console output for debugging
-      echo "Instance console output:"
-      aws ec2 get-console-output --instance-id $INSTANCE_ID --output text || true
-      
-      # Check security group settings
-      SG_ID=$(aws ec2 describe-instances \
-        --instance-ids $INSTANCE_ID \
-        --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
-        --output text)
-      echo "Security group: $SG_ID"
-      aws ec2 describe-security-groups --group-ids $SG_ID --query "SecurityGroups[0].IpPermissions" || true
-      
-      # Try SSH connection with verbose output
-      if ssh -v -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no ubuntu@$IP exit 2>/dev/null; then
+      if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no ubuntu@$IP echo "SSH connection successful" 2>/dev/null; then
         echo "Found healthy instance $INSTANCE_ID with IP $IP"
         # Output only the IP to stdout
         echo $IP >&3
@@ -82,8 +79,8 @@ for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
         echo "SSH connection failed for instance $INSTANCE_ID on attempt $i."
         
         if [ $i -lt $MAX_SSH_RETRIES ]; then
-          echo "Waiting 10 seconds before next SSH attempt..."
-          sleep 10
+          echo "Waiting 5 seconds before next SSH attempt..."
+          sleep 5
         fi
       fi
     done
@@ -92,29 +89,12 @@ for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
   fi
 done
 
-# If we get here, consider the most recent running instance as "healthy" even if SSH failed
-# This is a fallback for cases where the SSH setup has issues
-for INSTANCE_ID in "${INSTANCE_ARRAY[@]}"; do
-  STATE=$(aws ec2 describe-instances \
-    --instance-ids $INSTANCE_ID \
-    --query "Reservations[0].Instances[0].State.Name" \
-    --output text)
-  
-  if [ "$STATE" == "running" ]; then
-    IP=$(aws ec2 describe-instances \
-      --instance-ids $INSTANCE_ID \
-      --query "Reservations[0].Instances[0].PublicIpAddress" \
-      --output text)
-    
-    if [ -z "$IP" ] || [ "$IP" == "None" ] || [ "$IP" == "null" ]; then
-      continue
-    fi
-    
-    echo "FALLBACK: Using running instance $INSTANCE_ID with IP $IP without SSH validation"
-    echo $IP >&3
-    exit 0
-  fi
-done
+# If we get here and have a fallback, use it
+if [ ! -z "$FALLBACK_IP" ]; then
+  echo "FALLBACK: Using running instance $FALLBACK_ID with IP $FALLBACK_IP without SSH validation"
+  echo $FALLBACK_IP >&3
+  exit 0
+fi
 
 echo "No healthy instances found in the auto scaling group."
 echo "Please check the status of your instances or try to increase the desired capacity."
