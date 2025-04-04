@@ -8,7 +8,7 @@ on:
       setup_infrastructure:
         description: 'Set up AWS infrastructure'
         required: false
-        default: false
+        default: true
         type: boolean
 
 env:
@@ -18,6 +18,8 @@ env:
   AWS_USER: ubuntu
   APP_NAME: cold-email
   AWS_REGION: ${{ secrets.AWS_REGION }}
+  # Flag to indicate whether we're doing a manual run
+  MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
 
 jobs:
   validate:
@@ -80,8 +82,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: production
-    # Make this step manual to avoid unexpected infrastructure changes
-    if: github.event.inputs.setup_infrastructure == 'true'
+    # Run if manually triggered with setup_infrastructure OR it's a workflow_dispatch without inputs
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.setup_infrastructure == 'true') ||
+      (github.event_name == 'workflow_dispatch' && !github.event.inputs.setup_infrastructure)
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -103,6 +107,7 @@ jobs:
       
       - name: Set up AWS infrastructure
         run: |
+          echo "Setting up AWS infrastructure..."
           chmod +x deploy/aws-k8s/aws-infrastructure.sh
           cd deploy/aws-k8s
           ./aws-infrastructure.sh
@@ -175,13 +180,15 @@ jobs:
             --output text)
           echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
           echo "Load balancer DNS: $LB_DNS"
+    outputs:
+      setup_completed: "true"
 
   check-infra:
     name: Check Infrastructure
     needs: build
     runs-on: ubuntu-latest
     environment: production
-    if: github.event.inputs.setup_infrastructure != 'true'
+    if: github.event.inputs.setup_infrastructure != 'true' && github.event_name == 'push'
     outputs:
       infra_exists: ${{ steps.check-asg.outputs.infra_exists }}
     steps:
@@ -207,9 +214,7 @@ jobs:
   deploy:
     name: Deploy Application
     needs: [build, check-infra]
-    if: >-
-      always() && 
-      (needs.check-infra.result == 'success' && needs.check-infra.outputs.infra_exists == 'true')
+    if: needs.check-infra.outputs.infra_exists == 'true'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -290,8 +295,8 @@ jobs:
 
   infra-deploy:
     name: Deploy to Infrastructure
-    needs: [infra-setup]
-    if: success()
+    needs: [build, infra-setup]
+    if: needs.infra-setup.result == 'success'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -316,9 +321,28 @@ jobs:
       - name: Find healthy EC2 instance
         run: |
           chmod +x deploy/aws-k8s/get-healthy-instance.sh
-          EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh)
-          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-          echo "Using EC2 instance with IP $EC2_IP for deployment"
+          
+          # Try multiple times to find a healthy instance
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i to find a healthy instance..."
+            EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh || echo "")
+            
+            if [ ! -z "$EC2_IP" ]; then
+              echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+              echo "Found healthy instance with IP $EC2_IP"
+              break
+            fi
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Failed to find a healthy instance after $MAX_RETRIES attempts"
+              echo "Please ensure that the infrastructure setup has been completed."
+              exit 1
+            fi
+            
+            echo "Waiting 30 seconds before next attempt..."
+            sleep 30
+          done
       
       - name: Get load balancer DNS
         run: |
@@ -338,7 +362,7 @@ jobs:
   monitor:
     name: Monitor Deployment
     needs: [deploy, infra-deploy]
-    if: always() && (success('deploy') || success('infra-deploy'))
+    if: always() && (needs.deploy.result == 'success' || needs.infra-deploy.result == 'success')
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -363,9 +387,28 @@ jobs:
       - name: Find healthy EC2 instance
         run: |
           chmod +x deploy/aws-k8s/get-healthy-instance.sh
-          EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh)
-          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-          echo "Using EC2 instance with IP $EC2_IP for deployment"
+          
+          # Try multiple times to find a healthy instance
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i to find a healthy instance..."
+            EC2_IP=$(./deploy/aws-k8s/get-healthy-instance.sh || echo "")
+            
+            if [ ! -z "$EC2_IP" ]; then
+              echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+              echo "Found healthy instance with IP $EC2_IP"
+              break
+            fi
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Failed to find a healthy instance after $MAX_RETRIES attempts"
+              echo "Please ensure that the infrastructure setup has been completed."
+              exit 1
+            fi
+            
+            echo "Waiting 30 seconds before next attempt..."
+            sleep 30
+          done
       
       - name: Check Kubernetes deployment status
         run: |
