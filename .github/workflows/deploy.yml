@@ -105,8 +105,70 @@ jobs:
             cd deploy/aws-k8s
             ./aws-infrastructure.sh
             cd ../..
-            echo "Waiting for instances to be ready..."
-            sleep 300  # Longer wait to ensure instances are fully initialized and SSH is ready
+            
+            # Verify infrastructure was created
+            echo "Verifying infrastructure was created properly..."
+            
+            # Check if ASG exists
+            ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names ${APP_NAME}-asg \
+              --query "length(AutoScalingGroups)" \
+              --output text || echo "0")
+            
+            if [ "$ASG_EXISTS" == "0" ]; then
+              echo "ERROR: Auto Scaling Group was not created properly!"
+              exit 1
+            fi
+            
+            echo "Auto Scaling Group created successfully."
+            
+            # Check for launch template
+            LT_EXISTS=$(aws ec2 describe-launch-templates \
+              --launch-template-names ${APP_NAME}-launch-template \
+              --query "length(LaunchTemplates)" \
+              --output text || echo "0")
+            
+            if [ "$LT_EXISTS" == "0" ]; then
+              echo "ERROR: Launch Template was not created properly!"
+              exit 1
+            fi
+            
+            echo "Launch Template created successfully."
+            
+            # Wait for instances to launch and be fully ready
+            echo "Waiting for instances to be ready (5 minutes)..."
+            sleep 300
+            
+            # Check if any instances are running
+            RUNNING_INSTANCES=$(aws ec2 describe-instances \
+              --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+              --query "length(Reservations[].Instances[])" \
+              --output text || echo "0")
+            
+            if [ "$RUNNING_INSTANCES" == "0" ]; then
+              echo "WARNING: No running instances found after 5 minutes."
+              echo "Waiting an additional 3 minutes..."
+              sleep 180
+              
+              # Check again
+              RUNNING_INSTANCES=$(aws ec2 describe-instances \
+                --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+                --query "length(Reservations[].Instances[])" \
+                --output text || echo "0")
+              
+              if [ "$RUNNING_INSTANCES" == "0" ]; then
+                echo "ERROR: No instances are running. Checking ASG activities..."
+                
+                # Check ASG activities for errors
+                aws autoscaling describe-scaling-activities \
+                  --auto-scaling-group-name ${APP_NAME}-asg \
+                  --max-items 5
+                
+                echo "Continuing with deployment, but instance setup may have issues."
+              fi
+            else
+              echo "Found $RUNNING_INSTANCES running instances."
+            fi
           else
             # Check if ASG exists
             ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "length(AutoScalingGroups)" --output text || echo "0")
@@ -116,12 +178,63 @@ jobs:
               cd deploy/aws-k8s
               ./aws-infrastructure.sh
               cd ../..
-              echo "Waiting for instances to be ready..."
-              sleep 300  # Longer wait to ensure instances are fully initialized and SSH is ready
+              
+              # Verify infrastructure was created
+              echo "Verifying infrastructure was created properly..."
+              
+              # Check if ASG exists now
+              ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
+                --auto-scaling-group-names ${APP_NAME}-asg \
+                --query "length(AutoScalingGroups)" \
+                --output text || echo "0")
+              
+              if [ "$ASG_EXISTS" == "0" ]; then
+                echo "ERROR: Auto Scaling Group was not created properly!"
+                exit 1
+              fi
+              
+              echo "Auto Scaling Group created successfully."
+              echo "Waiting for instances to be ready (5 minutes)..."
+              sleep 300
             else
-              echo "Infrastructure already exists, skipping setup."
+              echo "Infrastructure already exists, checking instance health..."
+              
+              # Check if any instances are running
+              RUNNING_INSTANCES=$(aws ec2 describe-instances \
+                --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+                --query "length(Reservations[].Instances[])" \
+                --output text || echo "0")
+              
+              if [ "$RUNNING_INSTANCES" == "0" ]; then
+                echo "WARNING: No running instances found in existing ASG."
+                echo "Checking ASG desired capacity..."
+                
+                DESIRED_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
+                  --auto-scaling-group-names ${APP_NAME}-asg \
+                  --query "AutoScalingGroups[0].DesiredCapacity" \
+                  --output text)
+                
+                if [ "$DESIRED_CAPACITY" == "0" ]; then
+                  echo "Desired capacity is 0. Increasing to 1..."
+                  aws autoscaling set-desired-capacity \
+                    --auto-scaling-group-name ${APP_NAME}-asg \
+                    --desired-capacity 1
+                  
+                  echo "Waiting for instances to launch (3 minutes)..."
+                  sleep 180
+                else
+                  echo "Desired capacity is $DESIRED_CAPACITY, but no running instances found."
+                  echo "This may indicate issues with instance launches."
+                  echo "ASG activities:"
+                  
+                  aws autoscaling describe-scaling-activities \
+                    --auto-scaling-group-name ${APP_NAME}-asg \
+                    --max-items 5
+                fi
+              else
+                echo "Found $RUNNING_INSTANCES running instances."
+              fi
             fi
-          fi
       
       - name: Verify EC2 security group
         run: |
@@ -637,8 +750,94 @@ jobs:
               --output text)
             
             if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
-              echo "No running instances found. Cannot continue with SSM deployment."
-              exit 1
+              echo "No running instances found. Checking if ASG exists..."
+              
+              ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
+                --auto-scaling-group-names ${APP_NAME}-asg \
+                --query "length(AutoScalingGroups)" \
+                --output text 2>/dev/null || echo "0")
+              
+              if [ "$ASG_EXISTS" == "0" ]; then
+                echo "No Auto Scaling Group found. Creating infrastructure from scratch..."
+                chmod +x deploy/aws-k8s/aws-infrastructure.sh
+                cd deploy/aws-k8s
+                ./aws-infrastructure.sh
+                cd ../..
+                echo "Waiting for instances to be created and initialized (5 minutes)..."
+                sleep 300
+                
+                # Try to get the instance ID again
+                INSTANCE_ID=$(aws ec2 describe-instances \
+                  --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+                  --query "Reservations[0].Instances[0].InstanceId" \
+                  --output text)
+                
+                if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+                  echo "Still no instances found after creating infrastructure. Trying to increase capacity..."
+                  
+                  # Try to increase ASG capacity
+                  aws autoscaling set-desired-capacity \
+                    --auto-scaling-group-name ${APP_NAME}-asg \
+                    --desired-capacity 2
+                  
+                  echo "Waiting for additional instances (3 minutes)..."
+                  sleep 180
+                  
+                  # Try one more time
+                  INSTANCE_ID=$(aws ec2 describe-instances \
+                    --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+                    --query "Reservations[0].Instances[0].InstanceId" \
+                    --output text)
+                fi
+              else
+                echo "Auto Scaling Group exists but no running instances found. Checking desired capacity..."
+                
+                DESIRED_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
+                  --auto-scaling-group-names ${APP_NAME}-asg \
+                  --query "AutoScalingGroups[0].DesiredCapacity" \
+                  --output text)
+                
+                echo "Current desired capacity: $DESIRED_CAPACITY"
+                
+                if [ "$DESIRED_CAPACITY" == "0" ]; then
+                  echo "Increasing desired capacity to 1..."
+                  aws autoscaling set-desired-capacity \
+                    --auto-scaling-group-name ${APP_NAME}-asg \
+                    --desired-capacity 1
+                else
+                  echo "Terminating any unhealthy instances and refreshing ASG..."
+                  aws autoscaling start-instance-refresh \
+                    --auto-scaling-group-name ${APP_NAME}-asg \
+                    --strategy Rolling \
+                    --preferences "MinHealthyPercentage=0"
+                fi
+                
+                echo "Waiting for new instances to launch (5 minutes)..."
+                sleep 300
+                
+                # Try to get the instance ID again
+                INSTANCE_ID=$(aws ec2 describe-instances \
+                  --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+                  --query "Reservations[0].Instances[0].InstanceId" \
+                  --output text)
+              fi
+              
+              if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+                echo "Still no running instances found after recovery attempts."
+                echo "Please check AWS console for errors in instance launch."
+                
+                # Debug information
+                echo "ASG Status:"
+                aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg || echo "ASG not found"
+                
+                echo "Launch Template:"
+                aws ec2 describe-launch-templates --launch-template-names ${APP_NAME}-launch-template || echo "Launch template not found"
+                
+                echo "Security Groups:"
+                aws ec2 describe-security-groups --group-names ${APP_NAME}-ec2-sg || echo "Security group not found"
+                
+                exit 1
+              fi
             fi
             
             echo "Using instance $INSTANCE_ID for SSM deployment."
@@ -875,4 +1074,88 @@ jobs:
             --query "StandardOutputContent" \
             --output text
           
-          echo "SSM deployment completed!" 
+          echo "SSM deployment completed!"
+      
+      - name: Debug ASG and launch issues
+        if: ${{ failure() || success() }}
+        run: |
+          echo "Debugging Auto Scaling Group and Instance Launch issues..."
+          
+          # Check if ASG exists first
+          ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${APP_NAME}-asg \
+            --query "length(AutoScalingGroups)" \
+            --output text 2>/dev/null || echo "0")
+          
+          if [ "$ASG_EXISTS" == "0" ]; then
+            echo "Auto Scaling Group does not exist. Cannot proceed with debugging."
+            exit 0
+          fi
+          
+          # Get ASG details
+          echo "Getting Auto Scaling Group details..."
+          aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${APP_NAME}-asg
+          
+          # Get launch template details
+          echo "Getting Launch Template details..."
+          LT_NAME="${APP_NAME}-launch-template"
+          aws ec2 describe-launch-templates \
+            --launch-template-names $LT_NAME || echo "Launch template not found"
+          
+          # Get scaling activities (shows errors in instance launches)
+          echo "Checking Auto Scaling Activities for errors..."
+          aws autoscaling describe-scaling-activities \
+            --auto-scaling-group-name ${APP_NAME}-asg \
+            --max-items 10
+          
+          # List any existing instances, even if not running
+          echo "Listing all instances in the ASG (any state)..."
+          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${APP_NAME}-asg \
+            --query "AutoScalingGroups[0].Instances[*].InstanceId" \
+            --output text)
+          
+          if [ -z "$INSTANCE_IDS" ]; then
+            echo "No instances found in the Auto Scaling Group at all."
+          else
+            echo "Found instances: $INSTANCE_IDS"
+            
+            # Check each instance's state and possible status reason
+            for INSTANCE_ID in $INSTANCE_IDS; do
+              echo "Details for instance $INSTANCE_ID:"
+              aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+                --query "Reservations[0].Instances[0].{State:State.Name,StateReason:StateReason,LaunchTime:LaunchTime}"
+              
+              # If instance is in terminated state, get the reason
+              STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+                --query "Reservations[0].Instances[0].State.Name" \
+                --output text 2>/dev/null || echo "unknown")
+              
+              if [ "$STATE" == "terminated" ] || [ "$STATE" == "shutting-down" ]; then
+                echo "Terminated instance reason:"
+                aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+                  --query "Reservations[0].Instances[0].StateReason"
+              fi
+            done
+          fi
+          
+          # Check if there were any problems with the IAM role
+          echo "Checking IAM role..."
+          aws iam get-role --role-name ${APP_NAME}-ssm-role || echo "IAM role not found"
+          
+          # Check security group
+          echo "Checking security group..."
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=${APP_NAME}-ec2-sg" \
+            --query "SecurityGroups[0].GroupId" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -z "$SG_ID" ] || [ "$SG_ID" == "None" ]; then
+            echo "Security group not found"
+          else
+            echo "Security group found: $SG_ID"
+            aws ec2 describe-security-groups --group-ids $SG_ID
+          fi
+          
+          echo "Debug information complete." 

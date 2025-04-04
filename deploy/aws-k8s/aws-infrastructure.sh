@@ -1,8 +1,9 @@
 #!/bin/bash
 # AWS Infrastructure Setup Script for Cold Email Generator
 
-# Exit on error
+# Exit on error, but allow debugging
 set -e
+set -o pipefail
 
 # Define variables
 AWS_REGION=${AWS_REGION:-"us-east-1"}
@@ -14,6 +15,34 @@ KEY_NAME=${KEY_NAME:-"cold-email-generator"}  # Replace with your SSH key name
 APP_NAME="cold-email"
 
 echo "Setting up AWS infrastructure for Cold Email Generator..."
+
+# Check AWS CLI installation and configuration
+if ! command -v aws &> /dev/null; then
+  echo "ERROR: AWS CLI is not installed. Please install it first."
+  exit 1
+fi
+
+# Verify AWS credentials
+echo "Verifying AWS credentials..."
+aws sts get-caller-identity || {
+  echo "ERROR: AWS credentials are invalid or not configured properly."
+  exit 1
+}
+
+# Get a more recent AMI ID for Ubuntu 22.04
+echo "Finding latest Ubuntu 22.04 AMI..."
+AMI_ID=$(aws ec2 describe-images \
+  --owners 099720109477 \
+  --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+  --query "sort_by(Images, &CreationDate)[-1].ImageId" \
+  --output text)
+
+if [ -z "$AMI_ID" ] || [ "$AMI_ID" == "None" ]; then
+  echo "WARNING: Failed to get latest Ubuntu AMI, using fallback AMI..."
+  AMI_ID="ami-0c7217cdde317cfec"  # Fallback to a known working AMI
+else
+  echo "Found latest Ubuntu AMI: $AMI_ID"
+fi
 
 # Step 1: Create VPC and networking components
 echo "Creating VPC..."
@@ -72,7 +101,49 @@ ROLE_NAME="${APP_NAME}-ssm-role"
 # Check if role already exists
 ROLE_EXISTS=$(aws iam get-role --role-name $ROLE_NAME 2>/dev/null && echo "true" || echo "false")
 if [ "$ROLE_EXISTS" == "true" ]; then
-  echo "IAM role $ROLE_NAME already exists, skipping creation."
+  echo "IAM role $ROLE_NAME already exists, checking permissions..."
+  
+  # Check if the role has the necessary policies
+  SSM_POLICY_ATTACHED=$(aws iam list-attached-role-policies \
+    --role-name $ROLE_NAME \
+    --query "AttachedPolicies[?PolicyName=='AmazonSSMManagedInstanceCore'].PolicyName" \
+    --output text)
+  
+  if [ -z "$SSM_POLICY_ATTACHED" ]; then
+    echo "Attaching SSM policy to existing role..."
+    aws iam attach-role-policy \
+      --role-name $ROLE_NAME \
+      --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  fi
+  
+  EC2_POLICY_ATTACHED=$(aws iam list-attached-role-policies \
+    --role-name $ROLE_NAME \
+    --query "AttachedPolicies[?PolicyName=='AmazonEC2FullAccess'].PolicyName" \
+    --output text)
+  
+  if [ -z "$EC2_POLICY_ATTACHED" ]; then
+    echo "Attaching EC2 policy to existing role..."
+    aws iam attach-role-policy \
+      --role-name $ROLE_NAME \
+      --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess
+  fi
+  
+  # Check if instance profile exists
+  PROFILE_EXISTS=$(aws iam get-instance-profile --instance-profile-name $ROLE_NAME 2>/dev/null && echo "true" || echo "false")
+  
+  if [ "$PROFILE_EXISTS" == "false" ]; then
+    echo "Creating instance profile..."
+    aws iam create-instance-profile --instance-profile-name $ROLE_NAME > /dev/null
+    
+    echo "Adding role to instance profile..."
+    aws iam add-role-to-instance-profile \
+      --instance-profile-name $ROLE_NAME \
+      --role-name $ROLE_NAME
+    
+    # Wait for the instance profile to be fully available
+    echo "Waiting for instance profile to be available..."
+    sleep 10
+  fi
 else
   # Create the role
   echo "Creating IAM role..."
@@ -89,28 +160,54 @@ else
           "Action": "sts:AssumeRole"
         }
       ]
-    }' > /dev/null
+    }' > /dev/null || {
+      echo "ERROR: Failed to create IAM role"
+      exit 1
+    }
   
   # Attach SSM policy to the role
   echo "Attaching SSM policy to role..."
   aws iam attach-role-policy \
     --role-name $ROLE_NAME \
-    --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+    --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore || {
+      echo "ERROR: Failed to attach SSM policy"
+      aws iam delete-role --role-name $ROLE_NAME
+      exit 1
+    }
+  
+  # Attach EC2 policy to the role
+  echo "Attaching EC2 policy to role..."
+  aws iam attach-role-policy \
+    --role-name $ROLE_NAME \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess || {
+      echo "WARNING: Failed to attach EC2 policy, continuing anyway"
+    }
   
   # Create instance profile
   echo "Creating instance profile..."
   aws iam create-instance-profile \
-    --instance-profile-name $ROLE_NAME > /dev/null
+    --instance-profile-name $ROLE_NAME > /dev/null || {
+      echo "ERROR: Failed to create instance profile"
+      aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      aws iam delete-role --role-name $ROLE_NAME
+      exit 1
+    }
   
   # Add role to instance profile
   echo "Adding role to instance profile..."
   aws iam add-role-to-instance-profile \
     --instance-profile-name $ROLE_NAME \
-    --role-name $ROLE_NAME
+    --role-name $ROLE_NAME || {
+      echo "ERROR: Failed to add role to instance profile"
+      aws iam delete-instance-profile --instance-profile-name $ROLE_NAME
+      aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      aws iam delete-role --role-name $ROLE_NAME
+      exit 1
+    }
   
   # Wait for the instance profile to be fully available
   echo "Waiting for instance profile to be available..."
-  sleep 10
+  sleep 20
 fi
 
 # Get instance profile ARN
@@ -304,7 +401,7 @@ aws ec2 create-launch-template \
   --launch-template-name ${APP_NAME}-launch-template \
   --version-description "Initial version with K8s pre-installed" \
   --launch-template-data "{
-    \"ImageId\": \"ami-0c7217cdde317cfec\",
+    \"ImageId\": \"$AMI_ID\",
     \"InstanceType\": \"$EC2_TYPE\",
     \"KeyName\": \"$KEY_NAME\",
     \"IamInstanceProfile\": {
