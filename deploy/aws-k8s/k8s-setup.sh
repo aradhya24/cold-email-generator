@@ -12,9 +12,17 @@ sudo apt-get upgrade -y
 # Install basic utilities
 sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common gnupg
 
-# Add Kubernetes repository - updated URL
-curl -fsSL https://dl.k8s.io/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+# Add Kubernetes repository
+echo "Adding Kubernetes repository..."
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+# Verify the key was imported correctly
+sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 234654DA9A296436
+
+# Update apt again
+sudo apt-get update
 
 # Install Docker
 echo "Installing Docker..."
