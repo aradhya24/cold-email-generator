@@ -84,6 +84,17 @@ mkdir -p $HOME/k8s
 # Check if namespace exists, create if needed
 kubectl get namespace cold-email &>/dev/null || kubectl create namespace cold-email
 
+# Check if Groq API key is set, create Kubernetes secret if needed
+if [ ! -z "$GROQ_API_KEY" ]; then
+  echo "Creating secret for Groq API key..."
+  kubectl create secret generic app-secrets \
+    --namespace=cold-email \
+    --from-literal=GROQ_API_KEY=$GROQ_API_KEY \
+    --dry-run=client -o yaml | kubectl apply -f -
+else
+  echo "WARNING: GROQ_API_KEY is not set, application may have limited functionality"
+fi
+
 # Check if deployment template exists, create a simple one if not
 if [ ! -f "$HOME/k8s/deployment.yaml" ]; then
   echo "Deployment template not found, creating a default one..."
@@ -111,10 +122,24 @@ spec:
         env:
         - name: LB_DNS
           value: "${LB_DNS}"
+        - name: GROQ_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: GROQ_API_KEY
+              optional: true
         resources:
           limits:
             memory: "1Gi"
             cpu: "1000m"
+        readinessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
 EOF
 fi
 
@@ -134,6 +159,32 @@ spec:
   - port: 80
     targetPort: 8501
   type: NodePort
+EOF
+fi
+
+# Check if ingress template exists, create if needed
+if [ ! -f "$HOME/k8s/ingress.yaml" ]; then
+  echo "Ingress template not found, creating a default one..."
+  cat > $HOME/k8s/ingress.yaml << 'EOF'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cold-email-ingress
+  namespace: cold-email
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: cold-email-service
+            port:
+              number: 80
 EOF
 fi
 
@@ -161,14 +212,20 @@ fi
 # Set a trap for interruption
 trap 'echo "Deployment interrupted. Current state may be incomplete."' INT
 
-# Wait for deployment to be ready with extended timeout
+# Wait for deployment to be ready with extended timeout - but run in background to prevent SSH timeout
 echo "Waiting for deployment to be ready (may take several minutes)..."
-kubectl rollout status deployment/cold-email-generator -n cold-email --timeout=300s || {
-  echo "Deployment did not complete within timeout. Checking deployment status..."
-  kubectl get deployments -n cold-email
-  kubectl get pods -n cold-email
-  echo "Deployment may still be in progress. Continuing with other steps."
-}
+echo "Note: Running in background to prevent SSH timeout..."
+nohup kubectl rollout status deployment/cold-email-generator -n cold-email --timeout=300s > /tmp/deployment-status.log 2>&1 &
+
+# Give some time for initial pod creation
+sleep 30
+
+echo "Checking initial deployment status (pods may still be starting):"
+kubectl get pods -n cold-email || echo "No pods found yet, they may still be being created"
+kubectl get deployments -n cold-email
+
+echo "Note: The deployment continues in the background even after this script finishes."
+echo "You can check the status later with: kubectl get pods -n cold-email"
 
 # Get service details with retries
 echo "Getting service details..."
@@ -203,6 +260,7 @@ echo "Kubernetes resources:"
 echo "- Namespace: cold-email"
 echo "- Deployment: cold-email-generator"
 echo "- Service: cold-email-service"
+echo "- Ingress: cold-email-ingress"
 echo ""
 
 # Check and display deployments
@@ -236,4 +294,5 @@ echo "Service details:"
 kubectl describe service cold-email-service -n cold-email || echo "Could not retrieve service details"
 
 echo ""
-echo "Deployment process completed." 
+echo "Deployment process completed. The application should be available shortly."
+echo "You can monitor the deployment status by running: kubectl get pods -n cold-email" 
