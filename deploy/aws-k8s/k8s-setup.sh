@@ -65,16 +65,39 @@ sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/con
 sudo systemctl restart containerd
 sudo systemctl enable containerd
 
-# Check if Kubernetes is already initialized
+# Check if Kubernetes is in a broken state
+K8S_RESET_NEEDED=false
 if [ -f "/etc/kubernetes/admin.conf" ]; then
-  echo "Kubernetes appears to be already initialized. Skipping initialization."
-else
+  echo "Checking if existing Kubernetes cluster is functional..."
+  if ! sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes &>/dev/null; then
+    echo "Kubernetes appears to be in a broken state, will reset and reinitialize"
+    K8S_RESET_NEEDED=true
+  else
+    echo "Kubernetes appears to be already initialized and working. Skipping initialization."
+  fi
+fi
+
+# Reset Kubernetes if needed or not initialized
+if [ "$K8S_RESET_NEEDED" = true ] || [ ! -f "/etc/kubernetes/admin.conf" ]; then
+  # If we need to reset, do it
+  if [ "$K8S_RESET_NEEDED" = true ]; then
+    echo "Resetting Kubernetes..."
+    sudo kubeadm reset -f
+    
+    # Remove CNI configurations
+    sudo rm -rf /etc/cni/net.d/*
+    
+    # Reset iptables
+    sudo iptables -F && sudo iptables -t nat -F && sudo iptables -t mangle -F && sudo iptables -X
+  fi
+
   # Initialize Kubernetes with pod network CIDR for Flannel
   echo "Initializing Kubernetes cluster..."
   
   # Make sure swap is off (Kubernetes requirement)
   echo "Ensuring swap is disabled..."
   sudo swapoff -a
+  sudo sed -i '/swap/d' /etc/fstab
   
   # Check if kubeadm is installed
   if ! command -v kubeadm &> /dev/null; then
@@ -89,6 +112,10 @@ else
     sudo apt-get install -y kubelet kubeadm kubectl
     sudo apt-mark hold kubelet kubeadm kubectl
   fi
+  
+  # Pull images before initializing
+  echo "Pulling Kubernetes images..."
+  sudo kubeadm config images pull
   
   # Try to initialize kubeadm with retries
   if ! retry_command "sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=NumCPU,Mem,Swap" 3 30; then
@@ -111,12 +138,14 @@ echo "Verifying kubectl configuration..."
 if ! kubectl get nodes; then
   echo "kubectl configuration failed. Retrying with alternative approach..."
   export KUBECONFIG=/etc/kubernetes/admin.conf
-  kubectl get nodes
+  if ! kubectl get nodes; then
+    echo "ERROR: Could not configure kubectl. Continuing with setup..."
+  fi
 fi
 
 # Install Flannel CNI network plugin with retries
 echo "Installing Flannel CNI network plugin..."
-retry_command "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml" 3 15
+retry_command "kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml" 3 15
 
 # Allow scheduling pods on the master node (for single-node free tier setup)
 echo "Allowing pods to be scheduled on the master node..."
@@ -280,6 +309,7 @@ echo "System information:"
 uname -a
 free -h
 df -h
-kubectl get nodes
-kubectl -n kube-system get pods
+echo "Kubernetes status:"
+kubectl get nodes || echo "Unable to get node status"
+kubectl -n kube-system get pods || echo "Unable to get system pods"
 echo "Ready to deploy the application." 

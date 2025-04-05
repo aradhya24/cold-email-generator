@@ -559,7 +559,25 @@ unzip awscliv2.zip
 ./aws/install
 rm -rf aws awscliv2.zip
 
-# Install Docker
+# Configure kernel modules for containerd
+cat <<EOF | tee /etc/modules-load.d/containerd.conf
+overlay
+br_netfilter
+EOF
+
+modprobe overlay
+modprobe br_netfilter
+
+# Setup required sysctl params, these persist across reboots
+cat <<EOF | tee /etc/sysctl.d/99-kubernetes-cri.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+
+# Apply sysctl params without reboot
+sysctl --system
+
 # Install Docker using the recommended approach with keyrings
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -569,6 +587,14 @@ apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable docker
 systemctl start docker
+
+# Configure containerd for Kubernetes
+mkdir -p /etc/containerd
+containerd config default | tee /etc/containerd/config.toml >/dev/null
+sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+systemctl restart containerd
+systemctl enable containerd
+
 usermod -aG docker ubuntu
 
 # Create initialization marker to show user data has run
