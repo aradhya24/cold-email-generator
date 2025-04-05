@@ -331,13 +331,64 @@ jobs:
           # Copy and run Kubernetes deployment script
           scp -r k8s_manifests/ ${AWS_USER}@${EC2_IP}:~/k8s_manifests/ || echo "No manifests to copy"
           scp deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/
-          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-deploy.sh && \
+          scp deploy/aws-k8s/verify-access.sh ${AWS_USER}@${EC2_IP}:~/
+          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-deploy.sh ~/verify-access.sh && \
             export DOCKER_IMAGE=${DOCKER_IMAGE} && \
             export LB_DNS=${LB_DNS} && \
             export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && \
             ~/k8s-deploy.sh"
           
           echo "Application deployment completed."
+      
+      - name: Ensure Port Accessibility
+        run: |
+          echo "Ensuring application is accessible via NodePort 30405..."
+          
+          # Configure security group to allow port 30405
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=network-interface.addresses.association.public-ip,Values=${EC2_IP}" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+          
+          SG_ID=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
+            --output text)
+          
+          echo "Adding NodePort rule to security group $SG_ID..."
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SG_ID \
+            --protocol tcp \
+            --port 30405 \
+            --cidr 0.0.0.0/0 || echo "NodePort rule may already exist"
+            
+          echo "Adding HTTP rule to security group $SG_ID..."
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SG_ID \
+            --protocol tcp \
+            --port 80 \
+            --cidr 0.0.0.0/0 || echo "HTTP rule may already exist"
+          
+          # Run verification script remotely
+          echo "Running verification script to fix any connectivity issues..."
+          ssh ${AWS_USER}@${EC2_IP} "~/verify-access.sh"
+          
+          # Set iptables rules directly
+          echo "Ensuring iptables rules for port 30405..."
+          ssh ${AWS_USER}@${EC2_IP} "sudo iptables -I INPUT -p tcp --dport 30405 -j ACCEPT && \
+                                     sudo iptables -I OUTPUT -p tcp --sport 30405 -j ACCEPT"
+          
+          # Verify port 30405 is accessible
+          echo "Verifying application access..."
+          ssh ${AWS_USER}@${EC2_IP} "curl -s -o /dev/null -w 'Application Status: %{http_code}\n' http://localhost:30405 || echo 'Application not yet accessible locally'"
+          
+          # Wait for network propagation
+          echo "Waiting for network changes to propagate (30 seconds)..."
+          sleep 30
+          
+          # Verify external access
+          echo "Verifying external access..."
+          curl -s -o /dev/null -w "NodePort Status: %{http_code}\n" http://${EC2_IP}:30405 || echo "NodePort not accessible externally yet"
 
   validate_deployment:
     name: Validate Deployment

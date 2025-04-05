@@ -95,10 +95,14 @@ else
   echo "WARNING: GROQ_API_KEY is not set, application may have limited functionality"
 fi
 
-# Check if deployment template exists, create a simple one if not
-if [ ! -f "$HOME/k8s/deployment.yaml" ]; then
-  echo "Deployment template not found, creating a default one..."
-  cat > $HOME/k8s/deployment.yaml << 'EOF'
+# Fix container port configuration
+echo "Ensuring container is using the correct port..."
+grep -q 'PORT="3000"' $HOME/.bashrc || echo 'export PORT="3000"' >> $HOME/.bashrc
+source $HOME/.bashrc
+
+# Create a simple deployment with correct port configuration
+echo "Creating deployment with explicit port configuration..."
+cat << EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -117,36 +121,24 @@ spec:
       containers:
       - name: app
         image: ${DOCKER_IMAGE}
+        imagePullPolicy: Always
         ports:
-        - containerPort: 8501
+        - containerPort: 3000
+          name: http
         env:
-        - name: LB_DNS
-          value: "${LB_DNS}"
+        - name: PORT
+          value: "3000"
         - name: GROQ_API_KEY
           valueFrom:
             secretKeyRef:
               name: app-secrets
               key: GROQ_API_KEY
               optional: true
-        resources:
-          limits:
-            memory: "1Gi"
-            cpu: "1000m"
-        readinessProbe:
-          httpGet:
-            path: /_stcore/health
-            port: 8501
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
 EOF
-fi
 
-# Check if service template exists, create if needed
-if [ ! -f "$HOME/k8s/service.yaml" ]; then
-  echo "Service template not found, creating a default one..."
-  cat > $HOME/k8s/service.yaml << 'EOF'
+# Create a service with the correct NodePort configuration
+echo "Creating service with fixed NodePort..."
+cat << EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
@@ -156,112 +148,35 @@ spec:
   selector:
     app: cold-email-generator
   ports:
-  - port: 80
-    targetPort: 8501
+  - name: http
+    port: 80
+    targetPort: 3000
+    nodePort: 30405
   type: NodePort
 EOF
-fi
 
-# Check if ingress template exists, create if needed
-if [ ! -f "$HOME/k8s/ingress.yaml" ]; then
-  echo "Ingress template not found, creating a default one..."
-  cat > $HOME/k8s/ingress.yaml << 'EOF'
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: cold-email-ingress
-  namespace: cold-email
-  annotations:
-    kubernetes.io/ingress.class: "nginx"
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-spec:
-  rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: cold-email-service
-            port:
-              number: 80
-EOF
-fi
+# Verify the deployment and fix iptables rules
+echo "Verifying deployment and fixing network rules..."
+kubectl rollout status deployment/cold-email-generator -n cold-email --timeout=120s
 
-# Apply deployment with environment variable substitution
-echo "Deploying the application..."
-cd $HOME/k8s
-envsubst < deployment.yaml > deployment-rendered.yaml
+# Ensure iptables rules allow traffic
+sudo iptables -I INPUT -p tcp --dport 30405 -j ACCEPT
+sudo iptables -I OUTPUT -p tcp --sport 30405 -j ACCEPT
 
-# Apply with retries
-echo "Applying deployment..."
-retry_command "kubectl apply -f deployment-rendered.yaml" 3 15
+# Ensure node port is accessible by testing connection
+echo "Testing NodePort connection..."
+curl -s -o /dev/null -w "NodePort Status: %{http_code}\n" http://localhost:30405 || echo "Not accessible yet"
 
-# Apply service with retries
-echo "Creating service..."
-retry_command "kubectl apply -f service.yaml" 3 15
-
-# Try to apply ingress if it exists
-if [ -f "$HOME/k8s/ingress.yaml" ]; then
-  echo "Creating ingress..."
-  retry_command "kubectl apply -f ingress.yaml" 3 15
-else
-  echo "No ingress manifest found, skipping ingress creation"
-fi
-
-# Set a trap for interruption
-trap 'echo "Deployment interrupted. Current state may be incomplete."' INT
-
-# Wait for deployment to be ready with extended timeout - but run in background to prevent SSH timeout
-echo "Waiting for deployment to be ready (may take several minutes)..."
-echo "Note: Running in background to prevent SSH timeout..."
-nohup kubectl rollout status deployment/cold-email-generator -n cold-email --timeout=300s > /tmp/deployment-status.log 2>&1 &
-
-# Give some time for initial pod creation
-sleep 30
-
-echo "Checking initial deployment status (pods may still be starting):"
-kubectl get pods -n cold-email || echo "No pods found yet, they may still be being created"
-kubectl get deployments -n cold-email
-
-echo "Note: The deployment continues in the background even after this script finishes."
-echo "You can check the status later with: kubectl get pods -n cold-email"
-
-# Get service details with retries
-echo "Getting service details..."
-NODE_PORT=""
-for i in {1..5}; do
-  NODE_PORT=$(kubectl get svc -n cold-email cold-email-service -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
-  if [ ! -z "$NODE_PORT" ]; then
-    break
-  fi
-  echo "Waiting for NodePort to be assigned... (attempt $i/5)"
-  sleep 10
-done
-
-# Get node IP with fallback
-NODE_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "unknown")
-if [ "$NODE_IP" == "unknown" ]; then
-  echo "Could not get instance public IP from metadata. Trying alternative method..."
-  NODE_IP=$(hostname -I | awk '{print $1}')
-fi
+# Get public IP for easier access
+PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
 
 echo ""
-echo "====== Deployment Summary ======"
-echo "Application deployment attempted!"
+echo "====== Application Access Information ======"
+echo "Application should now be accessible at:"
+echo "- NodePort URL: http://$PUBLIC_IP:30405"
+echo "- Load Balancer URL: http://$LB_DNS"
 echo ""
-echo "Application should be accessible at:"
-echo "- Load Balancer URL: http://${LB_DNS}"
-if [ ! -z "$NODE_PORT" ] && [ "$NODE_IP" != "unknown" ]; then
-  echo "- Node Port URL: http://${NODE_IP}:${NODE_PORT}"
-fi
-echo ""
-echo "Kubernetes resources:"
-echo "- Namespace: cold-email"
-echo "- Deployment: cold-email-generator"
-echo "- Service: cold-email-service"
-echo "- Ingress: cold-email-ingress"
-echo ""
+echo "If access fails, please run the verify-access.sh script for detailed diagnostics and automatic fixes."
 
 # Check and display deployments
 echo "Deployment status:"
@@ -294,5 +209,53 @@ echo "Service details:"
 kubectl describe service cold-email-service -n cold-email || echo "Could not retrieve service details"
 
 echo ""
-echo "Deployment process completed. The application should be available shortly."
-echo "You can monitor the deployment status by running: kubectl get pods -n cold-email" 
+echo "Deployment process completed. Thank you for using the Cold Email Generator!"
+
+# Check service status and print additional connectivity debugging info
+echo "Checking service details and connectivity..."
+kubectl get svc -n cold-email -o wide
+echo ""
+
+# Check if any pods are running and get their status
+echo "Checking pod status:"
+kubectl get pods -n cold-email
+FIRST_POD=$(kubectl get pods -n cold-email -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+# Check pod logs to see if there are any application errors
+if [ ! -z "$FIRST_POD" ]; then
+  echo ""
+  echo "Pod logs for application container:"
+  kubectl logs $FIRST_POD -n cold-email -c app || echo "Couldn't get logs"
+fi
+
+# Check if the application is accessible on the NodePort
+echo ""
+echo "Testing NodePort connectivity on port 30405..."
+nc -zv -w 5 localhost 30405 || echo "NodePort not accessible locally"
+
+# Check if the security group has the required ports open
+echo ""
+echo "Verifying security group rules for EC2 instance..."
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+SG_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
+aws ec2 describe-security-groups --group-ids $SG_ID --query "SecurityGroups[0].IpPermissions[?FromPort==\`30405\`]" --output json
+
+echo ""
+echo "Important ports to check in security group:"
+echo "- Port 22: SSH access"
+echo "- Port 80: HTTP/Load Balancer access" 
+echo "- Port 30405: Kubernetes NodePort access"
+echo ""
+echo "If the application is still not accessible, try updating security group rules to allow these ports."
+echo ""
+echo "Complete troubleshooting command to run on EC2 instance:"
+echo "sudo netstat -tulpn | grep -E '(30405|3000)'"
+echo ""
+echo "Wait a few minutes for the LoadBalancer to be fully provisioned and endpoints to be registered."
+echo "If application is still not accessible after 5-10 minutes, try these troubleshooting steps:"
+echo "1. Check pod status: kubectl get pods -n cold-email"
+echo "2. Check pod logs: kubectl logs -n cold-email [pod-name]"
+echo "3. Verify service endpoints: kubectl get endpoints -n cold-email"
+echo "4. Test connectivity directly to pod: kubectl port-forward -n cold-email [pod-name] 8080:3000"
+echo ""
+echo "Deployment process completed. Thank you for using the Cold Email Generator!" 
