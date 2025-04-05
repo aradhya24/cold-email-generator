@@ -50,6 +50,51 @@ sudo systemctl enable docker
 # Verify Docker is installed correctly
 docker --version
 
+# Install required dependencies for Kubernetes
+echo "Installing required dependencies for Kubernetes..."
+sudo apt-get install -y conntrack socat ebtables ethtool
+
+# Download and install crictl
+CRICTL_VERSION="v1.28.0"
+echo "Installing crictl $CRICTL_VERSION..."
+wget -q "https://github.com/kubernetes-sigs/cri-tools/releases/download/$CRICTL_VERSION/crictl-$CRICTL_VERSION-linux-amd64.tar.gz"
+sudo tar -zxvf "crictl-$CRICTL_VERSION-linux-amd64.tar.gz" -C /usr/local/bin
+rm -f "crictl-$CRICTL_VERSION-linux-amd64.tar.gz"
+
+# Configure crictl to work with containerd
+echo "Configuring crictl..."
+cat <<EOF | sudo tee /etc/crictl.yaml
+runtime-endpoint: unix:///var/run/containerd/containerd.sock
+image-endpoint: unix:///var/run/containerd/containerd.sock
+timeout: 10
+debug: false
+EOF
+
+# Install CNI plugins required for container networking
+echo "Installing CNI plugins..."
+CNI_PLUGINS_VERSION="v1.3.0"
+CNI_PLUGINS_DIR="/opt/cni/bin"
+sudo mkdir -p ${CNI_PLUGINS_DIR}
+curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-linux-amd64-${CNI_PLUGINS_VERSION}.tgz" | sudo tar -C ${CNI_PLUGINS_DIR} -xz
+
+# Setup containerd configuration for Kubernetes
+echo "Configuring containerd for Kubernetes..."
+sudo mkdir -p /etc/containerd
+cat <<EOF | sudo tee /etc/containerd/config.toml
+version = 2
+[plugins]
+  [plugins."io.containerd.grpc.v1.cri"]
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            SystemdCgroup = true
+EOF
+
+# Restart containerd to apply changes
+sudo systemctl restart containerd
+
 # Setup for Kubernetes
 echo "Setting up prerequisites for Kubernetes..."
 
