@@ -248,7 +248,7 @@ jobs:
           echo "LB_DNS=$LB_DNS" >> ec2_info.txt
       
       - name: Upload Instance Info
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v2
         with:
           name: ec2-instance-info
           path: ec2_info.txt
@@ -273,7 +273,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v1
+        uses: actions/download-artifact@v2
         with:
           name: ec2-instance-info
           path: ./
@@ -331,7 +331,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v1
+        uses: actions/download-artifact@v2
         with:
           name: ec2-instance-info
           path: ./
@@ -396,7 +396,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v1
+        uses: actions/download-artifact@v2
         with:
           name: ec2-instance-info
           path: ./
@@ -464,7 +464,7 @@ jobs:
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Download Instance Info
-        uses: actions/download-artifact@v1
+        uses: actions/download-artifact@v2
         with:
           name: ec2-instance-info
           path: ./
@@ -507,7 +507,7 @@ jobs:
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Download Instance Info
-        uses: actions/download-artifact@v1
+        uses: actions/download-artifact@v2
         with:
           name: ec2-instance-info
           path: ./
