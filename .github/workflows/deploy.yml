@@ -73,17 +73,17 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v1
       
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v1
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Build and push Docker image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v2
         with:
           context: .
           push: true
@@ -106,7 +106,7 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -248,7 +248,7 @@ jobs:
           echo "LB_DNS=$LB_DNS" >> ec2_info.txt
       
       - name: Upload Instance Info
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v1
         with:
           name: ec2-instance-info
           path: ec2_info.txt
@@ -266,16 +266,17 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v1
         with:
           name: ec2-instance-info
+          path: ./
       
       - name: Load Instance Info
         run: |
@@ -323,16 +324,17 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v1
         with:
           name: ec2-instance-info
+          path: ./
       
       - name: Load Instance Info
         run: |
@@ -387,16 +389,17 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v1
         with:
           name: ec2-instance-info
+          path: ./
       
       - name: Load Instance Info
         run: |
@@ -461,9 +464,10 @@ jobs:
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Download Instance Info
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v1
         with:
           name: ec2-instance-info
+          path: ./
       
       - name: Load Instance Info
         run: |
@@ -503,9 +507,10 @@ jobs:
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Download Instance Info
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v1
         with:
           name: ec2-instance-info
+          path: ./
       
       - name: Load Instance Info
         run: |
