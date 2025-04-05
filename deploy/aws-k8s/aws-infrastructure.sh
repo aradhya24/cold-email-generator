@@ -854,6 +854,20 @@ echo "Load balancer DNS: $LB_DNS"
 # Step 6: Create auto scaling group
 echo "Creating auto scaling group..."
 
+# Format target group ARNs for ASG command
+if [ -n "$TG_ARN" ]; then
+  # Check if TG_ARN needs to be enclosed in []
+  if [[ ! "$TG_ARN" == *"["* ]]; then
+    TG_ARN_FORMATTED="[\"$TG_ARN\"]"
+    echo "Formatted target group ARN: $TG_ARN_FORMATTED"
+  else
+    TG_ARN_FORMATTED="$TG_ARN"
+  fi
+else
+  echo "WARNING: Target group ARN is empty!"
+  TG_ARN_FORMATTED="[]"
+fi
+
 # Check if auto scaling group already exists
 ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
   --auto-scaling-group-names ${APP_NAME}-asg \
@@ -863,7 +877,7 @@ ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
 if [ "$ASG_EXISTS" != "0" ]; then
   echo "Auto scaling group already exists, updating configuration..."
   
-  # Update auto scaling group
+  # Update auto scaling group without target group if we're having issues with it
   aws autoscaling update-auto-scaling-group \
     --auto-scaling-group-name ${APP_NAME}-asg \
     --launch-template LaunchTemplateName=${APP_NAME}-launch-template,Version='$Latest' \
@@ -871,13 +885,21 @@ if [ "$ASG_EXISTS" != "0" ]; then
     --max-size 2 \
     --desired-capacity 1 \
     --vpc-zone-identifier "$PUBLIC_SUBNET_1,$PUBLIC_SUBNET_2" \
-    --target-group-arns $TG_ARN \
-    --health-check-type ELB \
+    --health-check-type EC2 \
     --health-check-grace-period 300
+  
+  # Try to attach target group separately if we have a valid ARN
+  if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
+    echo "Attaching target group to ASG..."
+    aws autoscaling attach-load-balancer-target-groups \
+      --auto-scaling-group-name ${APP_NAME}-asg \
+      --target-group-arns "$TG_ARN" || echo "Failed to attach target group, but continuing"
+  fi
   
   echo "Auto scaling group updated."
 else
-  # Create new auto scaling group
+  # Create new auto scaling group without target group first
+  echo "Creating new auto scaling group..."
   aws autoscaling create-auto-scaling-group \
     --auto-scaling-group-name ${APP_NAME}-asg \
     --launch-template LaunchTemplateName=${APP_NAME}-launch-template,Version='$Latest' \
@@ -885,9 +907,21 @@ else
     --max-size 2 \
     --desired-capacity 1 \
     --vpc-zone-identifier "$PUBLIC_SUBNET_1,$PUBLIC_SUBNET_2" \
-    --target-group-arns $TG_ARN \
-    --health-check-type ELB \
+    --health-check-type EC2 \
     --health-check-grace-period 300
+    
+  if [ $? -eq 0 ]; then
+    echo "Auto scaling group created, now attaching target group..."
+    
+    # Attach target group separately if we have a valid ARN
+    if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
+      aws autoscaling attach-load-balancer-target-groups \
+        --auto-scaling-group-name ${APP_NAME}-asg \
+        --target-group-arns "$TG_ARN" || echo "Failed to attach target group, but continuing"
+    fi
+  else
+    echo "WARNING: Failed to create auto scaling group"
+  fi
 fi
 
 # Step 7: Create scaling policies
