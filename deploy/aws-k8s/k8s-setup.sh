@@ -1,95 +1,96 @@
 #!/bin/bash
-# Kubernetes setup script for EC2 instances
-
+# Ultra-simple Kubernetes setup using K3s
 set -e
 
-echo "====== Setting up Kubernetes on EC2 instance ======"
+echo "====== Setting up Lightweight Kubernetes (K3s) on EC2 instance ======"
 
-# Clean up any previous Kubernetes installations
-echo "Cleaning up any previous installations..."
-sudo systemctl stop kubelet || true
-sudo systemctl disable kubelet || true
-sudo kubeadm reset -f || true
-sudo apt-get remove -y kubelet kubeadm kubectl kubernetes-cni || true
-sudo apt-get remove -y containerd docker.io docker-ce docker-ce-cli || true
-sudo rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd /etc/cni /opt/cni /var/run/kubernetes || true
-sudo apt-get autoremove -y
-sudo apt-get clean
+# Clean up any previous installations
+echo "Cleaning up any previous Kubernetes installations..."
+sudo systemctl stop kubelet microk8s k3s || true
+sudo apt-get remove -y kubeadm kubectl kubelet kubernetes-cni || true
+sudo snap remove microk8s || true
+sudo rm -rf /etc/kubernetes /var/lib/kubelet /etc/cni /opt/cni || true
+sudo rm -rf /var/lib/rancher/k3s || true
+sudo rm -f /usr/local/bin/k3s /usr/local/bin/kubectl || true
 
-echo "Installing MicroK8s (simplified Kubernetes)..."
-# Make sure snapd is installed
-sudo apt-get update
-sudo apt-get install -y snapd
+# Install K3s - the simplest way to run Kubernetes
+echo "Installing K3s (lightweight Kubernetes)..."
+curl -sfL https://get.k3s.io | sh -
 
-# Wait for snapd to be fully initialized
-echo "Waiting for snapd to be fully initialized..."
+# Wait for k3s to be ready
+echo "Waiting for K3s to start..."
 sleep 10
 
-# Install MicroK8s
-sudo snap install microk8s --classic --channel=1.28/stable
-
-# Wait for MicroK8s to be ready
-echo "Waiting for MicroK8s to start..."
-sudo microk8s status --wait-ready
-
-# Add current user to microk8s group
-sudo usermod -a -G microk8s $USER
-sudo mkdir -p $HOME/.kube
-sudo chown -R $USER:$USER $HOME/.kube
-
-# The following commands should run as the microk8s group
-# Instead of using newgrp which can fail in non-interactive shells,
-# we'll use a more reliable approach
-echo "Configuring MicroK8s..."
-
-# Enable required MicroK8s addons
-echo "Enabling MicroK8s addons..."
-sudo microk8s enable dns storage ingress
-
-# Set up kubectl alias and config
+# Set up kubectl config for the user
 echo "Setting up kubectl..."
-sudo microk8s kubectl config view --raw > $HOME/.kube/config
-sudo chmod 600 $HOME/.kube/config
+mkdir -p $HOME/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+sudo chmod 644 /etc/rancher/k3s/k3s.yaml
+sudo chown $USER:$USER $HOME/.kube/config
+export KUBECONFIG=$HOME/.kube/config
 
-# Allow the node to schedule pods (remove NoSchedule taint)
-echo "Allowing control-plane to run workloads..."
-sudo microk8s kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
-sudo microk8s kubectl taint nodes --all node-role.kubernetes.io/master- || true
-
-# Open NodePort port in firewall
-echo "Configuring firewall..."
+# Configure firewall
+echo "Configuring firewall for NodePort access..."
 sudo apt-get install -y ufw
 sudo ufw allow 22/tcp
-sudo ufw allow 16443/tcp # Kubernetes API server
-sudo ufw allow 10250/tcp # Kubelet
-sudo ufw allow 10255/tcp # Kubelet read-only
-sudo ufw allow 30000:32767/tcp # NodePort range
-sudo ufw allow 30405/tcp # Specific NodePort for our application
+sudo ufw allow 6443/tcp  # Kubernetes API
+sudo ufw allow 30000:32767/tcp  # NodePort range
+sudo ufw allow 30405/tcp  # Specific NodePort for our application
 sudo ufw --force enable
 
-# Verify everything is working correctly
-echo "Verifying MicroK8s installation..."
-sudo microk8s kubectl get nodes
-sudo microk8s kubectl get services --all-namespaces
+# Create a simple test deployment to verify it's working
+echo "Creating test deployment..."
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-test
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-test
+  template:
+    metadata:
+      labels:
+        app: nginx-test
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-test
+  namespace: default
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30405
+  selector:
+    app: nginx-test
+EOF
 
-# Enable privileged containers (required for some applications)
-echo "Enabling privileged containers..."
-sudo mkdir -p /var/snap/microk8s/current/args/
-echo "--allow-privileged=true" | sudo tee -a /var/snap/microk8s/current/args/kube-apiserver
-sudo systemctl restart snap.microk8s.daemon-apiserver
+# Wait for deployment to be ready
+echo "Waiting for test deployment to be ready..."
+kubectl rollout status deployment/nginx-test
 
-# Check functionality
-echo "Checking NodePort access..."
-sudo netstat -tulpn | grep -E '30405|30000|32767' || echo "NodePort range is configured but no services yet"
+# Get service details
+echo "Testing NodePort service..."
+kubectl get service nginx-test
 
-# Create aliases for easier usage
-echo "alias kubectl='microk8s kubectl'" >> ~/.bashrc
-echo "alias k='microk8s kubectl'" >> ~/.bashrc
+# Get public IP
+PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+echo "Test application available at: http://$PUBLIC_IP:30405"
 
 # Create a file to indicate completion
 touch $HOME/k8s-setup-complete
 
-echo "====== MicroK8s setup completed successfully ======"
-echo "You can now use 'microk8s kubectl' to interact with your Kubernetes cluster."
-
-echo "====== Kubernetes setup completed successfully ======"
+echo "====== K3s setup completed successfully ======"
+echo "Your application will be accessible at: http://$PUBLIC_IP:30405"
