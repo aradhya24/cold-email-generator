@@ -5,19 +5,50 @@ on:
     branches: [ main ]
   workflow_dispatch:
     inputs:
-      setup_infrastructure:
-        description: 'Set up AWS infrastructure'
+      force_recreate:
+        description: 'Force recreate all AWS resources'
         required: false
-        default: true
+        default: false
         type: boolean
 
 env:
+  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/cold-email:${{ github.sha }}
   APP_NAME: cold-email
   AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_USER: ubuntu
 
 jobs:
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.DOCKER_IMAGE }}
+            ghcr.io/${{ github.repository_owner }}/cold-email:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
-    name: Deploy
+    name: Deploy Infrastructure and Application
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -30,11 +61,104 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
-      - name: Run infrastructure script
+      - name: Setup AWS Infrastructure
         run: |
-          echo "Setting up infrastructure..."
+          echo "Setting up AWS infrastructure (ASG + Load Balancer)..."
+          
+          # Add force delete flag if requested
+          if [ "${{ github.event.inputs.force_recreate }}" == "true" ]; then
+            echo "Force recreating all AWS resources..."
+            export FORCE_RECREATE=true
+          fi
+          
           chmod +x deploy/aws-k8s/aws-infrastructure.sh
-          cd deploy/aws-k8s
-          ./aws-infrastructure.sh
-          cd ../..
-          echo "Infrastructure setup completed." 
+          ./deploy/aws-k8s/aws-infrastructure.sh
+          
+          echo "Waiting for instances to be ready (2 minutes)..."
+          sleep 120
+      
+      - name: Set up SSH
+        run: |
+          echo "Setting up SSH key for EC2 access..."
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # Simple SSH config
+          echo "Host *" > ~/.ssh/config
+          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
+          echo "  UserKnownHostsFile=/dev/null" >> ~/.ssh/config
+      
+      - name: Find EC2 Instance
+        id: find_instance
+        run: |
+          echo "Finding EC2 instance from Auto Scaling Group..."
+          
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+          
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+            echo "No running instances found. Checking Auto Scaling Group status..."
+            aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg
+            exit 1
+          fi
+          
+          INSTANCE_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text)
+          
+          echo "Found instance: $INSTANCE_ID with IP: $INSTANCE_IP"
+          echo "EC2_IP=$INSTANCE_IP" >> $GITHUB_ENV
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+      
+      - name: Get Load Balancer DNS
+        run: |
+          echo "Getting Load Balancer DNS..."
+          
+          LB_DNS=$(aws elbv2 describe-load-balancers \
+            --names ${APP_NAME}-lb \
+            --query "LoadBalancers[0].DNSName" \
+            --output text || echo "not-found")
+          
+          echo "Load Balancer DNS: $LB_DNS"
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+      
+      - name: Setup Kubernetes
+        run: |
+          echo "Setting up Kubernetes on EC2 instance: $EC2_IP"
+          
+          # Test SSH connection
+          ssh -o ConnectTimeout=30 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"
+          
+          # Copy and run Kubernetes setup script
+          scp deploy/aws-k8s/k8s-setup.sh ${AWS_USER}@${EC2_IP}:~/
+          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-setup.sh && ~/k8s-setup.sh"
+          
+          echo "Kubernetes setup completed."
+      
+      - name: Deploy Application
+        run: |
+          echo "Deploying application to Kubernetes..."
+          
+          # Copy and run Kubernetes deployment script
+          scp deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/
+          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-deploy.sh && \
+            export DOCKER_IMAGE=${DOCKER_IMAGE} && \
+            export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && \
+            ~/k8s-deploy.sh"
+          
+          echo "Application deployment completed."
+      
+      - name: Verify Deployment
+        run: |
+          echo "Verifying deployment..."
+          
+          # Check Kubernetes resources
+          ssh ${AWS_USER}@${EC2_IP} "kubectl get pods -n ${APP_NAME}"
+          ssh ${AWS_USER}@${EC2_IP} "kubectl get svc -n ${APP_NAME}"
+          
+          echo "Application deployed successfully!"
+          echo "Access your application at: http://$LB_DNS" 

@@ -13,8 +13,80 @@ PUBLIC_SUBNET_2_CIDR="10.0.2.0/24"
 EC2_TYPE="t2.micro"
 KEY_NAME=${KEY_NAME:-"cold-email-generator"}  # Replace with your SSH key name
 APP_NAME="cold-email"
+FORCE_RECREATE="${FORCE_RECREATE:-false}"
 
-echo "Setting up AWS infrastructure for Cold Email Generator..."
+echo "======================================================"
+echo "       Setting up AWS Infrastructure for $APP_NAME"
+echo "======================================================"
+echo "Region: $AWS_REGION"
+echo "EC2 Instance Type: $EC2_TYPE"
+echo "SSH Key Name: $KEY_NAME"
+echo "Force Recreation: $FORCE_RECREATE"
+echo "======================================================"
+
+# Force delete resources if requested
+if [ "$FORCE_RECREATE" == "true" ]; then
+  echo "Force delete enabled - removing existing resources"
+  
+  # Delete Auto Scaling Group if it exists
+  if aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg --query "length(AutoScalingGroups)" --output text 2>/dev/null | grep -q "1"; then
+    echo "Deleting Auto Scaling Group ${APP_NAME}-asg..."
+    aws autoscaling update-auto-scaling-group \
+      --auto-scaling-group-name ${APP_NAME}-asg \
+      --min-size 0 \
+      --max-size 0 \
+      --desired-capacity 0
+    
+    echo "Waiting for instances to terminate..."
+    sleep 60
+    
+    aws autoscaling delete-auto-scaling-group \
+      --auto-scaling-group-name ${APP_NAME}-asg \
+      --force-delete
+  else
+    echo "No Auto Scaling Group found to delete"
+  fi
+  
+  # Delete Load Balancer if it exists
+  if aws elbv2 describe-load-balancers --names ${APP_NAME}-lb --query "length(LoadBalancers)" --output text 2>/dev/null | grep -q "1"; then
+    echo "Deleting Load Balancer ${APP_NAME}-lb..."
+    LB_ARN=$(aws elbv2 describe-load-balancers --names ${APP_NAME}-lb --query "LoadBalancers[0].LoadBalancerArn" --output text)
+    
+    # Delete listeners first
+    LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn $LB_ARN --query "Listeners[*].ListenerArn" --output text 2>/dev/null || echo "")
+    for LISTENER in $LISTENERS; do
+      echo "Deleting listener $LISTENER..."
+      aws elbv2 delete-listener --listener-arn $LISTENER
+    done
+    
+    # Delete the load balancer
+    aws elbv2 delete-load-balancer --load-balancer-arn $LB_ARN
+    
+    echo "Waiting for load balancer to be deleted..."
+    sleep 30
+  else
+    echo "No Load Balancer found to delete"
+  fi
+  
+  # Delete Target Group if it exists
+  if aws elbv2 describe-target-groups --names ${APP_NAME}-tg --query "length(TargetGroups)" --output text 2>/dev/null | grep -q "1"; then
+    echo "Deleting Target Group ${APP_NAME}-tg..."
+    TG_ARN=$(aws elbv2 describe-target-groups --names ${APP_NAME}-tg --query "TargetGroups[0].TargetGroupArn" --output text)
+    aws elbv2 delete-target-group --target-group-arn $TG_ARN
+  else
+    echo "No Target Group found to delete"
+  fi
+  
+  # Delete Launch Template if it exists
+  if aws ec2 describe-launch-templates --launch-template-names ${APP_NAME}-launch-template --query "length(LaunchTemplates)" --output text 2>/dev/null | grep -q "1"; then
+    echo "Deleting Launch Template ${APP_NAME}-launch-template..."
+    aws ec2 delete-launch-template --launch-template-name ${APP_NAME}-launch-template
+  else
+    echo "No Launch Template found to delete"
+  fi
+  
+  echo "Resource cleanup completed"
+fi
 
 # Check AWS CLI installation and configuration
 if ! command -v aws &> /dev/null; then
