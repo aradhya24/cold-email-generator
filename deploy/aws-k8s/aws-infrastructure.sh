@@ -10,7 +10,7 @@ AWS_REGION=${AWS_REGION:-"us-east-1"}
 VPC_CIDR="10.0.0.0/16"
 PUBLIC_SUBNET_1_CIDR="10.0.1.0/24"
 PUBLIC_SUBNET_2_CIDR="10.0.2.0/24"
-EC2_TYPE="t2.micro"
+EC2_TYPE="t2.medium"  # Updated from t2.micro to t2.medium for more memory
 KEY_NAME=${KEY_NAME:-"cold-email-generator"}  # Replace with your SSH key name
 APP_NAME="cold-email"
 FORCE_RECREATE="${FORCE_RECREATE:-false}"
@@ -533,7 +533,6 @@ set -e
 
 # Update system
 apt-get update
-apt-get upgrade -y
 
 # Install basic tools
 apt-get install -y \
@@ -542,11 +541,7 @@ apt-get install -y \
   curl \
   gnupg \
   lsb-release \
-  jq \
-  unzip \
-  vim \
-  net-tools \
-  netcat
+  unzip
 
 # Ensure SSH is properly configured
 sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
@@ -559,47 +554,22 @@ unzip awscliv2.zip
 ./aws/install
 rm -rf aws awscliv2.zip
 
-# Configure kernel modules for containerd
-cat <<EOF | tee /etc/modules-load.d/containerd.conf
-overlay
-br_netfilter
-EOF
-
-modprobe overlay
-modprobe br_netfilter
-
-# Setup required sysctl params, these persist across reboots
-cat <<EOF | tee /etc/sysctl.d/99-kubernetes-cri.conf
-net.bridge.bridge-nf-call-iptables  = 1
-net.ipv4.ip_forward                 = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-EOF
-
-# Apply sysctl params without reboot
-sysctl --system
-
-# Install Docker using the recommended approach with keyrings
-install -m 0755 -d /etc/apt/keyrings
+# Install Docker for container management
+mkdir -p /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+apt-get install -y docker-ce docker-ce-cli containerd.io
 systemctl enable docker
 systemctl start docker
-
-# Configure containerd for Kubernetes
-mkdir -p /etc/containerd
-containerd config default | tee /etc/containerd/config.toml >/dev/null
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
-systemctl restart containerd
-systemctl enable containerd
-
 usermod -aG docker ubuntu
 
 # Create initialization marker to show user data has run
 touch /var/log/user-data-complete
+echo "$(date): Basic instance setup completed" > /var/log/user-data-complete
 
+# Signal success
 echo "EC2 instance initialization complete. Ready for SSH access."
 USERDATA
 )
@@ -906,7 +876,21 @@ ASG_EXISTS=$(aws autoscaling describe-auto-scaling-groups \
 if [ "$ASG_EXISTS" != "0" ]; then
   echo "Auto scaling group already exists, updating configuration..."
   
-  # Update auto scaling group without target group if we're having issues with it
+  # Get current target groups attached to ASG
+  CURRENT_TGS=$(aws autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names ${APP_NAME}-asg \
+    --query "AutoScalingGroups[0].TargetGroupARNs" \
+    --output json 2>/dev/null || echo "[]")
+  
+  # Clean up existing target groups if there are more than one or they differ from our current one
+  if [ "$CURRENT_TGS" != "[]" ] && [ "$CURRENT_TGS" != "[$TG_ARN]" ]; then
+    echo "Detaching existing target groups from ASG..."
+    aws autoscaling detach-load-balancer-target-groups \
+      --auto-scaling-group-name ${APP_NAME}-asg \
+      --target-group-arns $(echo $CURRENT_TGS | tr -d '[]" ' | tr ',' ' ') || echo "Failed to detach target groups, but continuing"
+  fi
+  
+  # Update auto scaling group without target group
   aws autoscaling update-auto-scaling-group \
     --auto-scaling-group-name ${APP_NAME}-asg \
     --launch-template LaunchTemplateName=${APP_NAME}-launch-template,Version='$Latest' \
@@ -917,7 +901,7 @@ if [ "$ASG_EXISTS" != "0" ]; then
     --health-check-type EC2 \
     --health-check-grace-period 300
   
-  # Try to attach target group separately if we have a valid ARN
+  # Try to attach our target group if we have a valid ARN
   if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
     echo "Attaching target group to ASG..."
     aws autoscaling attach-load-balancer-target-groups \
@@ -984,4 +968,115 @@ echo "export PUBLIC_SUBNET_1=$PUBLIC_SUBNET_1" >> ./infrastructure-output.env
 echo "export PUBLIC_SUBNET_2=$PUBLIC_SUBNET_2" >> ./infrastructure-output.env
 echo "export EC2_SG=$EC2_SG" >> ./infrastructure-output.env
 echo "export LB_DNS=$LB_DNS" >> ./infrastructure-output.env
-echo "export TG_ARN=$TG_ARN" >> ./infrastructure-output.env 
+echo "export TG_ARN=$TG_ARN" >> ./infrastructure-output.env
+
+# Wait for instances to be ready and verify the ASG is working
+echo "Waiting for instances to be ready (2 minutes)..."
+MAX_WAIT_TIME=120
+START_TIME=$(date +%s)
+
+while [ $(($(date +%s) - START_TIME)) -lt $MAX_WAIT_TIME ]; do
+  # Check if there are any running instances in the ASG
+  INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names ${APP_NAME}-asg \
+    --query "length(AutoScalingGroups[0].Instances)" \
+    --output text)
+  
+  if [ "$INSTANCE_COUNT" -gt 0 ]; then
+    echo "Auto Scaling Group has $INSTANCE_COUNT instance(s), checking status..."
+    
+    # Check instance status
+    INSTANCE_DETAILS=$(aws autoscaling describe-auto-scaling-groups \
+      --auto-scaling-group-names ${APP_NAME}-asg \
+      --query "AutoScalingGroups[0].Instances[*].[InstanceId, LifecycleState]" \
+      --output json)
+    
+    echo "Instance details: $INSTANCE_DETAILS"
+    
+    # Check if at least one instance is in "InService" state
+    IN_SERVICE=$(echo "$INSTANCE_DETAILS" | grep -c "InService" || echo "0")
+    
+    if [ "$IN_SERVICE" -gt 0 ]; then
+      echo "At least one instance is in service, ASG is working correctly!"
+      break
+    else
+      echo "Instances are launching but not yet in service. Waiting..."
+    fi
+  else
+    echo "No instances found in ASG yet. Checking scaling activities..."
+    
+    # Describe scaling activities to see if there are any errors
+    aws autoscaling describe-scaling-activities \
+      --auto-scaling-group-name ${APP_NAME}-asg \
+      --max-items 5
+    
+    # Check for recent terminated instances to understand failure reasons
+    echo "Checking for recently terminated instances..."
+    aws ec2 describe-instances \
+      --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=terminated" \
+      --query "Reservations[].Instances[?StateReason!=null].[InstanceId,StateReason.Message]" \
+      --output json
+  fi
+  
+  echo "Waiting 15 seconds before next check..."
+  sleep 15
+done
+
+# Final check of the ASG status
+echo "Final Auto Scaling Group status:"
+aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names ${APP_NAME}-asg \
+  --output json
+
+# If there are instances, try to get their status
+INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names ${APP_NAME}-asg \
+  --query "AutoScalingGroups[0].Instances[*].InstanceId" \
+  --output text)
+
+if [ -n "$INSTANCE_IDS" ] && [ "$INSTANCE_IDS" != "None" ]; then
+  echo "Found instances in ASG: $INSTANCE_IDS"
+  
+  # For each instance, get details and check status
+  for INSTANCE_ID in $INSTANCE_IDS; do
+    echo "Checking instance $INSTANCE_ID details:"
+    aws ec2 describe-instances \
+      --instance-ids $INSTANCE_ID \
+      --query "Reservations[0].Instances[0].[State.Name,StateReason.Message,InstanceType,LaunchTime,PublicIpAddress]" \
+      --output json
+      
+    # Check if instance console output is available
+    echo "Trying to get console output for instance $INSTANCE_ID:"
+    aws ec2 get-console-output \
+      --instance-id $INSTANCE_ID \
+      --output text || echo "No console output available yet"
+  done
+  
+  # Check if we can verify user data execution via SSM
+  echo "Checking for user-data completion marker via SSM:"
+  for INSTANCE_ID in $INSTANCE_IDS; do
+    aws ssm send-command \
+      --instance-ids $INSTANCE_ID \
+      --document-name "AWS-RunShellScript" \
+      --parameters commands=["ls -la /var/log/user-data-complete || echo 'Marker file not found'"] \
+      --output text || echo "SSM not available for instance $INSTANCE_ID yet"
+  done
+fi
+
+# Check launch template details
+echo "Launch Template details:"
+aws ec2 describe-launch-templates \
+  --launch-template-names ${APP_NAME}-launch-template \
+  --output json
+
+echo "Latest Launch Template version details:"
+LATEST_VERSION=$(aws ec2 describe-launch-templates \
+  --launch-template-names ${APP_NAME}-launch-template \
+  --query "LaunchTemplates[0].LatestVersionNumber" \
+  --output text)
+  
+aws ec2 describe-launch-template-versions \
+  --launch-template-name ${APP_NAME}-launch-template \
+  --versions $LATEST_VERSION \
+  --query "LaunchTemplateVersions[0].LaunchTemplateData" \
+  --output json 
