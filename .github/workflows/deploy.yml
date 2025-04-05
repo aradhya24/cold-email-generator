@@ -248,10 +248,11 @@ jobs:
           echo "LB_DNS=$LB_DNS" >> ec2_info.txt
       
       - name: Upload Instance Info
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: ec2-instance-info
           path: ec2_info.txt
+          retention-days: 1
 
   setup_kubernetes:
     name: Setup Kubernetes Cluster
@@ -273,7 +274,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
           name: ec2-instance-info
           path: ./
@@ -281,11 +282,25 @@ jobs:
       - name: Load Instance Info
         run: |
           echo "Loading EC2 instance information..."
-          cat ec2_info.txt
-          source ec2_info.txt
-          echo "EC2 IP: $EC2_IP"
-          echo "Instance ID: $INSTANCE_ID"
-          echo "LB DNS: $LB_DNS"
+          if [ -f "ec2_info.txt" ]; then
+            cat ec2_info.txt
+            source ec2_info.txt
+            echo "EC2 IP from file: $EC2_IP"
+          else
+            echo "ec2_info.txt not found. Using environment variables from needs context."
+            export EC2_IP="${{ needs.deploy_infrastructure.outputs.ec2_ip }}"
+            export INSTANCE_ID="${{ needs.deploy_infrastructure.outputs.instance_id }}"
+            export LB_DNS="${{ needs.deploy_infrastructure.outputs.lb_dns }}"
+            echo "EC2 IP from outputs: $EC2_IP"
+            # Create ec2_info.txt for later steps
+            echo "EC2_IP=$EC2_IP" > ec2_info.txt
+            echo "INSTANCE_ID=$INSTANCE_ID" >> ec2_info.txt
+            echo "LB_DNS=$LB_DNS" >> ec2_info.txt
+          fi
+          # Make variables available to subsequent steps
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
       
       - name: Set up SSH
         run: |
@@ -331,7 +346,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
           name: ec2-instance-info
           path: ./
@@ -339,10 +354,21 @@ jobs:
       - name: Load Instance Info
         run: |
           echo "Loading EC2 instance information..."
-          cat ec2_info.txt
-          source ec2_info.txt
-          echo "EC2 IP: $EC2_IP"
-          echo "LB DNS: $LB_DNS"
+          if [ -f "ec2_info.txt" ]; then
+            cat ec2_info.txt
+            source ec2_info.txt
+            echo "EC2 IP from file: $EC2_IP"
+          else
+            echo "ec2_info.txt not found. Using environment variables from needs context."
+            export EC2_IP="${{ needs.deploy_infrastructure.outputs.ec2_ip }}"
+            export INSTANCE_ID="${{ needs.deploy_infrastructure.outputs.instance_id }}"
+            export LB_DNS="${{ needs.deploy_infrastructure.outputs.lb_dns }}"
+            echo "EC2 IP from outputs: $EC2_IP"
+          fi
+          # Make variables available to subsequent steps
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
       
       - name: Set up SSH
         run: |
@@ -389,7 +415,7 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Download Instance Info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
           name: ec2-instance-info
           path: ./
@@ -397,10 +423,21 @@ jobs:
       - name: Load Instance Info
         run: |
           echo "Loading EC2 instance information..."
-          cat ec2_info.txt
-          source ec2_info.txt
-          echo "EC2 IP: $EC2_IP"
-          echo "LB DNS: $LB_DNS"
+          if [ -f "ec2_info.txt" ]; then
+            cat ec2_info.txt
+            source ec2_info.txt
+            echo "EC2 IP from file: $EC2_IP"
+          else
+            echo "ec2_info.txt not found. Using environment variables from needs context."
+            export EC2_IP="${{ needs.deploy_infrastructure.outputs.ec2_ip }}"
+            export INSTANCE_ID="${{ needs.deploy_infrastructure.outputs.instance_id }}"
+            export LB_DNS="${{ needs.deploy_infrastructure.outputs.lb_dns }}"
+            echo "EC2 IP from outputs: $EC2_IP"
+          fi
+          # Make variables available to subsequent steps
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
       
       - name: Basic Health Check
         run: |
@@ -423,7 +460,7 @@ jobs:
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Download Instance Info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
           name: ec2-instance-info
           path: ./
@@ -431,9 +468,18 @@ jobs:
       - name: Load Instance Info
         run: |
           echo "Loading instance information..."
-          cat ec2_info.txt
-          source ec2_info.txt
-          
+          if [ -f "ec2_info.txt" ]; then
+            cat ec2_info.txt
+            source ec2_info.txt
+            echo "LB DNS from file: $LB_DNS"
+          else
+            echo "ec2_info.txt not found. Using environment variables from needs context."
+            export LB_DNS="${{ needs.deploy_infrastructure.outputs.lb_dns }}"
+            echo "LB DNS from outputs: $LB_DNS"
+          fi
+          # Make variables available to subsequent steps
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+      
       - name: Run Simple Load Test
         run: |
           echo "Performing simple load test on $LB_DNS..."
@@ -451,7 +497,7 @@ jobs:
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Download Instance Info
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
           name: ec2-instance-info
           path: ./
@@ -459,8 +505,21 @@ jobs:
       - name: Load Instance Info
         run: |
           echo "Loading EC2 instance information..."
-          cat ec2_info.txt
-          source ec2_info.txt
+          if [ -f "ec2_info.txt" ]; then
+            cat ec2_info.txt
+            source ec2_info.txt
+            echo "EC2 IP from file: $EC2_IP"
+          else
+            echo "ec2_info.txt not found. Using environment variables from needs context."
+            export EC2_IP="${{ needs.deploy_infrastructure.outputs.ec2_ip }}"
+            export INSTANCE_ID="${{ needs.deploy_infrastructure.outputs.instance_id }}"
+            export LB_DNS="${{ needs.deploy_infrastructure.outputs.lb_dns }}"
+            echo "EC2 IP from outputs: $EC2_IP"
+          fi
+          # Make variables available to subsequent steps
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
       
       - name: Deployment Summary
         run: |
