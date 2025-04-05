@@ -34,8 +34,13 @@ sudo microk8s status --wait-ready
 
 # Add current user to microk8s group
 sudo usermod -a -G microk8s $USER
-sudo chown -R $USER:$USER ~/.kube
-newgrp microk8s << EOF
+sudo mkdir -p $HOME/.kube
+sudo chown -R $USER:$USER $HOME/.kube
+
+# The following commands should run as the microk8s group
+# Instead of using newgrp which can fail in non-interactive shells,
+# we'll use a more reliable approach
+echo "Configuring MicroK8s..."
 
 # Enable required MicroK8s addons
 echo "Enabling MicroK8s addons..."
@@ -43,8 +48,8 @@ sudo microk8s enable dns storage ingress
 
 # Set up kubectl alias and config
 echo "Setting up kubectl..."
-sudo microk8s kubectl config view --raw > ~/.kube/config
-sudo chmod 600 ~/.kube/config
+sudo microk8s kubectl config view --raw > $HOME/.kube/config
+sudo chmod 600 $HOME/.kube/config
 
 # Allow the node to schedule pods (remove NoSchedule taint)
 echo "Allowing control-plane to run workloads..."
@@ -86,9 +91,5 @@ touch $HOME/k8s-setup-complete
 
 echo "====== MicroK8s setup completed successfully ======"
 echo "You can now use 'microk8s kubectl' to interact with your Kubernetes cluster."
-EOF
-
-# Fix permissions just in case
-sudo chown -R $USER:$USER ~/.kube
 
 echo "====== Kubernetes setup completed successfully ======"
