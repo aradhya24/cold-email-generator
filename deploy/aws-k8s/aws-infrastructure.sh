@@ -527,7 +527,7 @@ echo "Creating launch template..."
 
 # Generate user data for EC2 instances
 echo "Creating user data script..."
-USER_DATA=$(cat <<EOF
+USER_DATA=$(cat <<'USERDATA'
 #!/bin/bash
 set -e
 
@@ -601,7 +601,7 @@ usermod -aG docker ubuntu
 touch /var/log/user-data-complete
 
 echo "EC2 instance initialization complete. Ready for SSH access."
-EOF
+USERDATA
 )
 
 # Encode user data for use in launch template
