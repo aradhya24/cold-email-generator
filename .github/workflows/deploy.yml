@@ -94,13 +94,28 @@ jobs:
         run: |
           echo "Finding EC2 instance from Auto Scaling Group..."
           
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" \
-            --output text)
+          # Retry multiple times to find a running instance
+          MAX_RETRIES=20
+          RETRY_COUNT=0
+          
+          until [ $RETRY_COUNT -ge $MAX_RETRIES ]
+          do
+            INSTANCE_ID=$(aws ec2 describe-instances \
+              --filters "Name=tag:aws:autoscaling:groupName,Values=${APP_NAME}-asg" "Name=instance-state-name,Values=running" \
+              --query "Reservations[0].Instances[0].InstanceId" \
+              --output text)
+            
+            if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+              echo "No running instances found yet. Retry $RETRY_COUNT of $MAX_RETRIES..."
+              RETRY_COUNT=$((RETRY_COUNT+1))
+              sleep 15
+            else
+              break
+            fi
+          done
           
           if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
-            echo "No running instances found. Checking Auto Scaling Group status..."
+            echo "No running instances found after retries. Checking Auto Scaling Group status..."
             aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${APP_NAME}-asg
             exit 1
           fi
@@ -113,6 +128,48 @@ jobs:
           echo "Found instance: $INSTANCE_ID with IP: $INSTANCE_IP"
           echo "EC2_IP=$INSTANCE_IP" >> $GITHUB_ENV
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          
+          # Ensure security group has SSH access
+          echo "Ensuring security group has SSH access..."
+          SG_ID=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
+            --output text)
+          
+          echo "Security Group: $SG_ID"
+          
+          # Add SSH access rule
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SG_ID \
+            --protocol tcp \
+            --port 22 \
+            --cidr 0.0.0.0/0 || echo "SSH rule may already exist"
+      
+      - name: Wait for SSH availability
+        run: |
+          echo "Waiting for SSH to be available on $EC2_IP..."
+          
+          # Wait for SSH to be available with retries
+          MAX_RETRIES=30
+          RETRY_COUNT=0
+          
+          until [ $RETRY_COUNT -ge $MAX_RETRIES ]
+          do
+            echo "Attempt $RETRY_COUNT of $MAX_RETRIES..."
+            nc -zv $EC2_IP 22 -w 5 && break
+            RETRY_COUNT=$((RETRY_COUNT+1))
+            sleep 10
+          done
+          
+          if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+            echo "SSH is not available after maximum retries"
+            echo "Checking instance system log..."
+            aws ec2 get-console-output --instance-id $INSTANCE_ID
+            exit 1
+          fi
+          
+          echo "SSH is now available. Giving system additional time to fully initialize..."
+          sleep 30
       
       - name: Get Load Balancer DNS
         run: |

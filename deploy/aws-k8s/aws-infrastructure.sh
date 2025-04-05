@@ -257,86 +257,105 @@ fi
 # Step 2: Create security group
 echo "Creating security group..."
 
-# Check if security group already exists
-EXISTING_SG=$(aws ec2 describe-security-groups \
+# Create security group for EC2 instances
+echo "Creating security group..."
+SG_ID=$(aws ec2 describe-security-groups \
   --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=${APP_NAME}-ec2-sg" \
-  --query "SecurityGroups[0].GroupId" \
+  --query 'SecurityGroups[0].GroupId' \
   --output text 2>/dev/null || echo "")
 
-if [ -z "$EXISTING_SG" ] || [ "$EXISTING_SG" == "None" ]; then
-  echo "Creating new security group..."
+if [ -z "$SG_ID" ] || [ "$SG_ID" == "None" ]; then
   EC2_SG=$(aws ec2 create-security-group \
     --group-name ${APP_NAME}-ec2-sg \
-    --description "Security group for EC2 instances running K8s" \
+    --description "${APP_NAME} EC2 security group" \
     --vpc-id $VPC_ID \
-    --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${APP_NAME}-ec2-sg}]" \
-    --query 'GroupId' --output text)
+    --query 'GroupId' \
+    --output text)
   
-  echo "Configuring security group rules..."
-  # Allow SSH from anywhere for GitHub Actions to connect
-  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 22 --cidr 0.0.0.0/0
-  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 80 --cidr 0.0.0.0/0
-  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 443 --cidr 0.0.0.0/0
-  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 8501 --cidr 0.0.0.0/0
-  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol tcp --port 6443 --cidr 0.0.0.0/0
-  aws ec2 authorize-security-group-ingress --group-id $EC2_SG --protocol all --source-group $EC2_SG
+  # Add rules to the security group
+  echo "Adding security group rules..."
+  
+  # SSH access - required for deployment
+  echo "Adding SSH access rule (port 22)..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --protocol tcp \
+    --port 22 \
+    --cidr 0.0.0.0/0
+  
+  # HTTP access for the web app
+  echo "Adding HTTP access rule (port 80)..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --protocol tcp \
+    --port 80 \
+    --cidr 0.0.0.0/0
+  
+  # HTTPS access
+  echo "Adding HTTPS access rule (port 443)..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --protocol tcp \
+    --port 443 \
+    --cidr 0.0.0.0/0
+  
+  # Streamlit port
+  echo "Adding Streamlit access rule (port 8501)..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --protocol tcp \
+    --port 8501 \
+    --cidr 0.0.0.0/0
+  
+  # Kubernetes API port
+  echo "Adding Kubernetes API access rule (port 6443)..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --protocol tcp \
+    --port 6443 \
+    --cidr 0.0.0.0/0
+  
+  # Allow self-referencing for instances to communicate
+  echo "Adding self-referencing rule..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --source-group $EC2_SG \
+    --protocol -1
 else
-  echo "Using existing security group: $EXISTING_SG"
-  EC2_SG=$EXISTING_SG
+  echo "Using existing security group: $SG_ID"
+  EC2_SG=$SG_ID
   
-  # Ensure security group has the necessary rules
+  # Ensure security group has all required rules
   echo "Ensuring security group has necessary rules..."
   
-  # Function to check if rule exists and add if not
+  # Function to ensure a rule exists
   ensure_sg_rule() {
     local port=$1
-    local cidr=$2
-    local proto=$3
+    local protocol=$2
+    local cidr=$3
+    local desc="$4"
     
-    # Check if rule exists
-    RULE_EXISTS=$(aws ec2 describe-security-groups \
-      --group-ids $EC2_SG \
-      --filters "Name=ip-permission.from-port,Values=$port" \
-              "Name=ip-permission.to-port,Values=$port" \
-              "Name=ip-permission.cidr,Values=$cidr" \
-              "Name=ip-permission.protocol,Values=$proto" \
-      --query "SecurityGroups[0].IpPermissions[?FromPort==\`$port\` && ToPort==\`$port\`].IpRanges[?CidrIp==\`$cidr\`].CidrIp" \
-      --output text 2>/dev/null || echo "")
-    
-    if [ -z "$RULE_EXISTS" ] || [ "$RULE_EXISTS" == "None" ]; then
-      echo "Adding $proto rule for port $port from $cidr..."
-      aws ec2 authorize-security-group-ingress \
-        --group-id $EC2_SG \
-        --protocol $proto \
-        --port $port \
-        --cidr $cidr 2>/dev/null || echo "Rule already exists or couldn't be added"
-    else
-      echo "Rule for port $port from $cidr already exists"
-    fi
-  }
-  
-  # Add required rules
-  ensure_sg_rule 22 "0.0.0.0/0" "tcp"
-  ensure_sg_rule 80 "0.0.0.0/0" "tcp"
-  ensure_sg_rule 443 "0.0.0.0/0" "tcp"
-  ensure_sg_rule 8501 "0.0.0.0/0" "tcp"
-  ensure_sg_rule 6443 "0.0.0.0/0" "tcp"
-  
-  # Check for self-referencing rule (allowing all traffic within the security group)
-  SELF_RULE_EXISTS=$(aws ec2 describe-security-groups \
-    --group-ids $EC2_SG \
-    --query "SecurityGroups[0].IpPermissions[?UserIdGroupPairs[?GroupId==\`$EC2_SG\`]].UserIdGroupPairs[?GroupId==\`$EC2_SG\`].GroupId" \
-    --output text 2>/dev/null || echo "")
-  
-  if [ -z "$SELF_RULE_EXISTS" ] || [ "$SELF_RULE_EXISTS" == "None" ]; then
-    echo "Adding self-referencing rule..."
+    echo "Adding $protocol rule for port $port from $cidr..."
     aws ec2 authorize-security-group-ingress \
       --group-id $EC2_SG \
-      --protocol all \
-      --source-group $EC2_SG 2>/dev/null || echo "Self-referencing rule already exists or couldn't be added"
-  else
-    echo "Self-referencing rule already exists"
-  fi
+      --protocol $protocol \
+      --port $port \
+      --cidr $cidr 2>/dev/null || echo "Rule already exists or couldn't be added"
+  }
+  
+  # Ensure all necessary rules exist
+  ensure_sg_rule 22 tcp 0.0.0.0/0 "SSH"
+  ensure_sg_rule 80 tcp 0.0.0.0/0 "HTTP"
+  ensure_sg_rule 443 tcp 0.0.0.0/0 "HTTPS"
+  ensure_sg_rule 8501 tcp 0.0.0.0/0 "Streamlit"
+  ensure_sg_rule 6443 tcp 0.0.0.0/0 "Kubernetes API"
+  
+  # Ensure self-referencing rule
+  echo "Adding self-referencing rule..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --source-group $EC2_SG \
+    --protocol -1 2>/dev/null || echo "Self-referencing rule already exists or couldn't be added"
 fi
 
 # Step 3: Create IAM role for SSM access
@@ -505,182 +524,59 @@ done
 
 # Step 4: Create EC2 launch template with Kubernetes pre-installed
 echo "Creating launch template..."
-ENCODED_USER_DATA=$(cat << 'EOF' | base64 -w 0
+
+# Generate user data for EC2 instances
+echo "Creating user data script..."
+USER_DATA=$(cat <<EOF
 #!/bin/bash
-# Update system and install Docker
-apt-get update && apt-get upgrade -y
-apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+set -e
 
-# Ensure SSH is properly installed and configured first
-echo "Setting up SSH server..."
-apt-get install -y openssh-server
+# Update system
+apt-get update
+apt-get upgrade -y
 
-# Create SSH directory structure if needed
-mkdir -p /root/.ssh /home/ubuntu/.ssh
-chmod 700 /root/.ssh /home/ubuntu/.ssh
+# Install basic tools
+apt-get install -y \
+  apt-transport-https \
+  ca-certificates \
+  curl \
+  gnupg \
+  lsb-release \
+  jq \
+  unzip \
+  vim \
+  net-tools \
+  netcat
 
-# Make sure the SSH service is enabled and started
-systemctl enable ssh
-systemctl start ssh
-
-# Configure SSH securely
-cat > /etc/ssh/sshd_config.d/secure-ssh.conf << 'EOSSH'
-# SSH Secure Configuration
-Port 22
-Protocol 2
-HostKey /etc/ssh/ssh_host_rsa_key
-HostKey /etc/ssh/ssh_host_ecdsa_key
-HostKey /etc/ssh/ssh_host_ed25519_key
-PermitRootLogin no
-PubkeyAuthentication yes
-PasswordAuthentication no
-PermitEmptyPasswords no
-ChallengeResponseAuthentication no
-UsePAM yes
-X11Forwarding no
-PrintMotd no
-AcceptEnv LANG LC_*
-Subsystem sftp /usr/lib/openssh/sftp-server
-LogLevel VERBOSE
-EOSSH
-
-# Generate SSH host keys if they don't exist
-ssh-keygen -A
-
-# Restart SSH to apply changes
+# Ensure SSH is properly configured
+sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 systemctl restart ssh
 
-# Install AWS SSM Agent
-echo "Installing AWS SSM Agent..."
-mkdir -p /tmp/ssm
-cd /tmp/ssm
-wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
-dpkg -i amazon-ssm-agent.deb
-systemctl enable amazon-ssm-agent
-systemctl start amazon-ssm-agent
-
-# Verify SSM Agent is running
-if systemctl is-active --quiet amazon-ssm-agent; then
-  echo "SSM Agent is running"
-else
-  echo "SSM Agent is not running, attempting to fix..."
-  systemctl restart amazon-ssm-agent
-  sleep 5
-  if ! systemctl is-active --quiet amazon-ssm-agent; then
-    echo "Failed to start SSM Agent, reinstalling..."
-    apt-get remove --purge -y amazon-ssm-agent
-    mkdir -p /tmp/ssm-reinstall
-    cd /tmp/ssm-reinstall
-    wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
-    dpkg -i amazon-ssm-agent.deb
-    systemctl enable amazon-ssm-agent
-    systemctl start amazon-ssm-agent
-  fi
-fi
-
-# Ensure instance has proper IAM profile for SSM
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region || curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/[a-z]$//')
-echo "Instance ID: $INSTANCE_ID in region $REGION"
-
-# Verify SSH is running
-if ! systemctl is-active --quiet ssh; then
-  echo "SSH failed to start properly after configuration. Attempting to fix..."
-  apt-get remove --purge -y openssh-server
-  apt-get install -y openssh-server
-  systemctl enable ssh
-  systemctl start ssh
-fi
-
-# Set up SSH verification loop
-echo "Verifying SSH service is running properly..."
-MAX_RETRIES=5
-SSH_OK=false
-
-for i in $(seq 1 $MAX_RETRIES); do
-  if systemctl is-active --quiet ssh; then
-    echo "SSH service is running (attempt $i/$MAX_RETRIES)"
-    # Test SSH connection locally to verify it's accepting connections
-    if nc -z -w5 localhost 22; then
-      echo "SSH port is open and accepting connections"
-      SSH_OK=true
-      break
-    else
-      echo "SSH port is not responding despite service running"
-    fi
-  else
-    echo "SSH service is not running (attempt $i/$MAX_RETRIES)"
-    systemctl restart ssh
-  fi
-  sleep 10
-done
-
-if [ "$SSH_OK" = false ]; then
-  echo "WARNING: SSH verification failed after $MAX_RETRIES attempts"
-  # Continue anyway as this is just the user data script
-fi
+# Install AWS CLI
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+./aws/install
+rm -rf aws awscliv2.zip
 
 # Install Docker
-echo "Installing Docker..."
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
-add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io
-systemctl enable docker && systemctl start docker
-
-# Install Kubernetes components
-echo "Installing Kubernetes components..."
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-cat << EOK > /etc/apt/sources.list.d/kubernetes.list
-deb https://apt.kubernetes.io/ kubernetes-xenial main
-EOK
-apt-get update && apt-get install -y kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
-
-# Set hostname based on instance ID for uniqueness
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-hostnamectl set-hostname k8s-node-$INSTANCE_ID
-
-# Disable swap (required for Kubernetes)
-swapoff -a
-sed -i '/swap/s/^/#/' /etc/fstab
-
-# Create required directories
-mkdir -p /home/ubuntu/k8s /home/ubuntu/scripts
-chown -R ubuntu:ubuntu /home/ubuntu/k8s /home/ubuntu/scripts
-
-# Add user to docker group
+add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable"
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io
+systemctl enable docker
+systemctl start docker
 usermod -aG docker ubuntu
 
-# Set appropriate permissions for ubuntu user
-echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu
-chmod 440 /etc/sudoers.d/ubuntu
+# Create initialization marker to show user data has run
+touch /var/log/user-data-complete
 
-# Copy the ubuntu user authorized_keys from the AWS launch
-if [ -f /home/ubuntu/.ssh/authorized_keys ]; then
-  cp /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
-  chmod 600 /root/.ssh/authorized_keys
-  chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
-  chmod 600 /home/ubuntu/.ssh/authorized_keys
-fi
-
-# Make sure the ubuntu user can access Docker without sudo
-newgrp docker << ENDGROUP
-su - ubuntu -c "docker version"
-ENDGROUP
-
-# Signal that user-data script has completed
-echo "User data script completed at $(date)" > /tmp/user-data-complete
-chmod 644 /tmp/user-data-complete
-
-# Final checks
-echo "====== FINAL ENVIRONMENT STATUS ======"
-systemctl status ssh --no-pager || true
-ss -tlnp | grep :22 || true
-ls -la /home/ubuntu/.ssh/
-echo "Ubuntu user in groups: $(groups ubuntu)"
-echo "======================================"
+echo "EC2 instance initialization complete. Ready for SSH access."
 EOF
 )
+
+# Encode user data for use in launch template
+ENCODED_USER_DATA=$(echo -n "$USER_DATA" | base64 -w 0)
 
 # Check if launch template already exists
 LAUNCH_TEMPLATE_EXISTS=$(aws ec2 describe-launch-templates \
