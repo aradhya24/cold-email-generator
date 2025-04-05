@@ -97,6 +97,10 @@ jobs:
     name: Deploy AWS Infrastructure
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      ec2_ip: ${{ steps.find_instance.outputs.ec2_ip }}
+      instance_id: ${{ steps.find_instance.outputs.instance_id }}
+      lb_dns: ${{ steps.get_lb_dns.outputs.lb_dns }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -176,6 +180,14 @@ jobs:
           echo "EC2_IP=$INSTANCE_IP" >> $GITHUB_ENV
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
           
+          # Also set output variables for downstream jobs
+          echo "ec2_ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          
+          # Save to a file that can be shared with other jobs
+          echo "EC2_IP=$INSTANCE_IP" > ec2_info.txt
+          echo "INSTANCE_ID=$INSTANCE_ID" >> ec2_info.txt
+          
           # Ensure security group has SSH access
           echo "Ensuring security group has SSH access..."
           SG_ID=$(aws ec2 describe-instances \
@@ -219,6 +231,7 @@ jobs:
           sleep 30
       
       - name: Get Load Balancer DNS
+        id: get_lb_dns
         run: |
           echo "Getting Load Balancer DNS..."
           
@@ -229,11 +242,25 @@ jobs:
           
           echo "Load Balancer DNS: $LB_DNS"
           echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+          echo "lb_dns=$LB_DNS" >> $GITHUB_OUTPUT
+          
+          # Save to the shared file
+          echo "LB_DNS=$LB_DNS" >> ec2_info.txt
+      
+      - name: Upload Instance Info
+        uses: actions/upload-artifact@v3
+        with:
+          name: ec2-instance-info
+          path: ec2_info.txt
 
   setup_kubernetes:
     name: Setup Kubernetes Cluster
     needs: deploy_infrastructure
     runs-on: ubuntu-latest
+    env:
+      EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
+      INSTANCE_ID: ${{ needs.deploy_infrastructure.outputs.instance_id }}
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -244,6 +271,20 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Download Instance Info
+        uses: actions/download-artifact@v3
+        with:
+          name: ec2-instance-info
+      
+      - name: Load Instance Info
+        run: |
+          echo "Loading EC2 instance information..."
+          cat ec2_info.txt
+          source ec2_info.txt
+          echo "EC2 IP: $EC2_IP"
+          echo "Instance ID: $INSTANCE_ID"
+          echo "LB DNS: $LB_DNS"
       
       - name: Set up SSH
         run: |
@@ -272,8 +313,11 @@ jobs:
 
   deploy_application:
     name: Deploy Application to Kubernetes
-    needs: setup_kubernetes
+    needs: [setup_kubernetes, deploy_infrastructure]
     runs-on: ubuntu-latest
+    env:
+      EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -284,6 +328,19 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Download Instance Info
+        uses: actions/download-artifact@v3
+        with:
+          name: ec2-instance-info
+      
+      - name: Load Instance Info
+        run: |
+          echo "Loading EC2 instance information..."
+          cat ec2_info.txt
+          source ec2_info.txt
+          echo "EC2 IP: $EC2_IP"
+          echo "LB DNS: $LB_DNS"
       
       - name: Set up SSH
         run: |
@@ -320,8 +377,11 @@ jobs:
 
   validate_deployment:
     name: Validate Deployment
-    needs: deploy_application
+    needs: [deploy_application, deploy_infrastructure]
     runs-on: ubuntu-latest
+    env:
+      EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -332,6 +392,19 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Download Instance Info
+        uses: actions/download-artifact@v3
+        with:
+          name: ec2-instance-info
+      
+      - name: Load Instance Info
+        run: |
+          echo "Loading EC2 instance information..."
+          cat ec2_info.txt
+          source ec2_info.txt
+          echo "EC2 IP: $EC2_IP"
+          echo "LB DNS: $LB_DNS"
       
       - name: Set up SSH
         run: |
@@ -382,9 +455,23 @@ jobs:
 
   load_testing:
     name: Load Testing (Simulated)
-    needs: validate_deployment
+    needs: [validate_deployment, deploy_infrastructure]
     runs-on: ubuntu-latest
+    env:
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
+      - name: Download Instance Info
+        uses: actions/download-artifact@v3
+        with:
+          name: ec2-instance-info
+      
+      - name: Load Instance Info
+        run: |
+          echo "Loading EC2 instance information..."
+          cat ec2_info.txt
+          source ec2_info.txt
+          echo "LB DNS: $LB_DNS"
+      
       - name: Run Load Tests
         run: |
           echo "Performing simulated load testing on the application..."
@@ -410,9 +497,23 @@ jobs:
 
   deployment_summary:
     name: Deployment Summary
-    needs: [validate_deployment, load_testing]
+    needs: [validate_deployment, load_testing, deploy_infrastructure]
     runs-on: ubuntu-latest
+    env:
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
+      - name: Download Instance Info
+        uses: actions/download-artifact@v3
+        with:
+          name: ec2-instance-info
+      
+      - name: Load Instance Info
+        run: |
+          echo "Loading EC2 instance information..."
+          cat ec2_info.txt
+          source ec2_info.txt
+          echo "LB DNS: $LB_DNS"
+      
       - name: Deployment Summary
         run: |
           echo "====== Cold Email Generator Deployment Summary ======"
@@ -431,4 +532,4 @@ jobs:
           echo "✓ Load Testing"
           echo ""
           echo "Deployment completed on: $(date)"
-          echo "================================================================" 
+          echo "=================================================================" 
