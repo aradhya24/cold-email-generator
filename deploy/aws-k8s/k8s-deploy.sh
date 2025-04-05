@@ -1,130 +1,77 @@
 #!/bin/bash
-# Kubernetes deployment script for cold email generator application
-
-# Exit on error, but enable trapping
+# Script to deploy application to Kubernetes
 set -e
 
 echo "====== Deploying Cold Email Generator to Kubernetes ======"
 
-# Function to retry commands
-retry_command() {
-  local CMD="$1"
-  local MAX_ATTEMPTS="$2"
-  local SLEEP_TIME="${3:-10}"
-  local ATTEMPT=1
-  
-  echo "Running command with up to $MAX_ATTEMPTS attempts: $CMD"
-  
-  while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-    echo "Attempt $ATTEMPT of $MAX_ATTEMPTS..."
-    
-    if eval "$CMD"; then
-      echo "Command succeeded on attempt $ATTEMPT"
-      return 0
-    else
-      echo "Command failed on attempt $ATTEMPT"
-      
-      if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-        echo "Waiting $SLEEP_TIME seconds before next attempt..."
-        sleep $SLEEP_TIME
-      fi
-    fi
-    
-    ATTEMPT=$((ATTEMPT + 1))
-  done
-  
-  echo "Command failed after $MAX_ATTEMPTS attempts"
-  return 1
-}
+# Get environment variables
+DOCKER_IMAGE=${DOCKER_IMAGE:-ghcr.io/aradhya24/cold-email:latest}
+LB_DNS=${LB_DNS:-pending.elb.amazonaws.com}
+APP_NAME=${APP_NAME:-cold-email}
 
-# Ensure required environment variables are set
-if [ -z "$DOCKER_IMAGE" ]; then
-  echo "ERROR: DOCKER_IMAGE environment variable is not set"
-  echo "Please set DOCKER_IMAGE to the full path of your Docker image including tag"
-  echo "Example: export DOCKER_IMAGE=ghcr.io/yourusername/cold-email:latest"
-  exit 1
-fi
-
+# Check if LB_DNS is set
 if [ -z "$LB_DNS" ]; then
   echo "WARNING: LB_DNS environment variable is not set"
   echo "The application will be deployed but might not have the load balancer DNS information"
-  # Set a default value
-  LB_DNS="pending.elb.amazonaws.com"
 fi
 
-# Check if kubectl is functioning
+# Check that kubectl is available
 echo "Verifying kubectl access..."
-if ! kubectl get nodes &>/dev/null; then
-  echo "kubectl cannot access the cluster. Checking configuration..."
-  
-  # Try to fix kubectl configuration
-  if [ -f "/etc/kubernetes/admin.conf" ]; then
-    echo "Found admin.conf, setting KUBECONFIG..."
-    export KUBECONFIG=/etc/kubernetes/admin.conf
-    
-    if ! kubectl get nodes &>/dev/null; then
-      echo "Still cannot access cluster. Trying to recreate kubeconfig..."
-      mkdir -p $HOME/.kube
-      sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
-      sudo chown $(id -u):$(id -g) $HOME/.kube/config
-    fi
-  else
-    echo "ERROR: Cannot access Kubernetes cluster and admin.conf not found."
-    echo "Kubernetes may not be properly initialized."
-    exit 1
-  fi
-fi
-
-echo "Using Docker image: $DOCKER_IMAGE"
-echo "Using Load Balancer DNS: $LB_DNS"
-
-# Create k8s directory if it doesn't exist
-mkdir -p $HOME/k8s
-
-# Check if namespace exists, create if needed
-kubectl get namespace cold-email &>/dev/null || kubectl create namespace cold-email
-
-# Check if Groq API key is set, create Kubernetes secret if needed
-if [ ! -z "$GROQ_API_KEY" ]; then
-  echo "Creating secret for Groq API key..."
-  kubectl create secret generic app-secrets \
-    --namespace=cold-email \
-    --from-literal=GROQ_API_KEY=$GROQ_API_KEY \
-    --dry-run=client -o yaml | kubectl apply -f -
+# Use direct path for K3s kubectl
+if [ -f /usr/local/bin/kubectl ]; then
+  KUBECTL_CMD="/usr/local/bin/kubectl"
+elif [ -f ~/.kube/config ]; then
+  KUBECTL_CMD="kubectl"
 else
-  echo "WARNING: GROQ_API_KEY is not set, application may have limited functionality"
+  KUBECTL_CMD="/usr/local/bin/k3s kubectl"
 fi
 
-# Fix container port configuration
-echo "Ensuring container is using the correct port..."
-grep -q 'PORT="3000"' $HOME/.bashrc || echo 'export PORT="3000"' >> $HOME/.bashrc
-source $HOME/.bashrc
+$KUBECTL_CMD get nodes
 
-# Create a simple deployment with correct port configuration
+# Create namespace if it doesn't exist
+echo "Creating namespace..."
+$KUBECTL_CMD create namespace ${APP_NAME} --dry-run=client -o yaml | $KUBECTL_CMD apply -f -
+
+# Print Docker image being used
+echo "Using Docker image: ${DOCKER_IMAGE}"
+echo "Using Load Balancer DNS: ${LB_DNS}"
+
+# Create secret for API key
+echo "Creating secret for Groq API key..."
+$KUBECTL_CMD create secret generic app-secrets \
+  --from-literal=GROQ_API_KEY="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" \
+  --namespace=${APP_NAME} \
+  --dry-run=client -o yaml | $KUBECTL_CMD apply -f -
+
+# First, delete any existing service to avoid port conflicts
+echo "Removing any existing services to avoid port conflicts..."
+$KUBECTL_CMD delete service ${APP_NAME}-service --namespace=${APP_NAME} --ignore-not-found=true
+
+# Create deployment with explicit PORT environment variable
+echo "Ensuring container is using the correct port..."
 echo "Creating deployment with explicit port configuration..."
-cat << EOF | kubectl apply -f -
+
+cat <<EOF | $KUBECTL_CMD apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cold-email-generator
-  namespace: cold-email
+  name: ${APP_NAME}-generator
+  namespace: ${APP_NAME}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: cold-email-generator
+      app: ${APP_NAME}-generator
   template:
     metadata:
       labels:
-        app: cold-email-generator
+        app: ${APP_NAME}-generator
     spec:
       containers:
-      - name: app
+      - name: ${APP_NAME}-generator
         image: ${DOCKER_IMAGE}
-        imagePullPolicy: Always
         ports:
         - containerPort: 3000
-          name: http
         env:
         - name: PORT
           value: "3000"
@@ -133,62 +80,70 @@ spec:
             secretKeyRef:
               name: app-secrets
               key: GROQ_API_KEY
-              optional: true
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
 EOF
 
-# Create a service with the correct NodePort configuration
+# Create NodePort service
 echo "Creating service with fixed NodePort..."
-cat << EOF | kubectl apply -f -
+cat <<EOF | $KUBECTL_CMD apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: cold-email-service
-  namespace: cold-email
+  name: ${APP_NAME}-service
+  namespace: ${APP_NAME}
 spec:
-  selector:
-    app: cold-email-generator
+  type: NodePort
   ports:
-  - name: http
-    port: 80
+  - port: 80
     targetPort: 3000
     nodePort: 30405
-  type: NodePort
+  selector:
+    app: ${APP_NAME}-generator
 EOF
 
-# Verify the deployment and fix iptables rules
-echo "Verifying deployment and fixing network rules..."
-kubectl rollout status deployment/cold-email-generator -n cold-email --timeout=120s
+# Wait for deployment to be ready
+echo "Waiting for deployment to be ready..."
+$KUBECTL_CMD rollout status deployment/${APP_NAME}-generator --namespace=${APP_NAME} --timeout=120s
 
-# Ensure iptables rules allow traffic
-sudo iptables -I INPUT -p tcp --dport 30405 -j ACCEPT
-sudo iptables -I OUTPUT -p tcp --sport 30405 -j ACCEPT
-
-# Ensure node port is accessible by testing connection
-echo "Testing NodePort connection..."
-curl -s -o /dev/null -w "NodePort Status: %{http_code}\n" http://localhost:30405 || echo "Not accessible yet"
-
-# Get public IP for easier access
+# Get public IP of the node
 PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
 
+# Display access URLs
 echo ""
-echo "====== Application Access Information ======"
-echo "Application should now be accessible at:"
-echo "- NodePort URL: http://$PUBLIC_IP:30405"
-echo "- Load Balancer URL: http://$LB_DNS"
+echo "Application deployment attempted!"
 echo ""
-echo "If access fails, please run the verify-access.sh script for detailed diagnostics and automatic fixes."
+echo "Application should be accessible at:"
+echo "- Load Balancer URL: http://${LB_DNS}"
+echo "- Node Port URL: http://${PUBLIC_IP}:30405"
+echo ""
+echo "Kubernetes resources:"
+echo "- Namespace: ${APP_NAME}"
+echo "- Deployment: ${APP_NAME}-generator"
+echo "- Service: ${APP_NAME}-service"
+echo "- Ingress: ${APP_NAME}-ingress"
+echo ""
+
+# Create a simple health check that will work even if the application is not yet ready
+echo "Testing application access..."
+curl -s --connect-timeout 5 http://${PUBLIC_IP}:30405 || echo "Application not yet responding (this is normal if it's still starting up)"
 
 # Check and display deployments
 echo "Deployment status:"
-kubectl get deployments -n cold-email || echo "Could not retrieve deployments"
+$KUBECTL_CMD get deployments -n ${APP_NAME} || echo "Could not retrieve deployments"
 
 # Check pod status and retry if no pods found
 echo "Pod status:"
-PODS=$(kubectl get pods -n cold-email 2>/dev/null)
+PODS=$($KUBECTL_CMD get pods -n ${APP_NAME} 2>/dev/null)
 if [ -z "$PODS" ]; then
   echo "No pods found. Waiting and trying again..."
   sleep 30
-  kubectl get pods -n cold-email || echo "Still no pods found."
+  $KUBECTL_CMD get pods -n ${APP_NAME} || echo "Still no pods found."
 else
   echo "$PODS"
 fi
@@ -196,9 +151,9 @@ fi
 # Show pod details for troubleshooting
 echo ""
 echo "Pod details (for troubleshooting):"
-FIRST_POD=$(kubectl get pods -n cold-email -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+FIRST_POD=$($KUBECTL_CMD get pods -n ${APP_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [ ! -z "$FIRST_POD" ]; then
-  kubectl describe pod $FIRST_POD -n cold-email || echo "Could not get pod details"
+  $KUBECTL_CMD describe pod $FIRST_POD -n ${APP_NAME} || echo "Could not get pod details"
 else
   echo "No pods found to describe"
 fi
@@ -206,26 +161,26 @@ fi
 # Show service details
 echo ""
 echo "Service details:"
-kubectl describe service cold-email-service -n cold-email || echo "Could not retrieve service details"
+$KUBECTL_CMD describe service ${APP_NAME}-service -n ${APP_NAME} || echo "Could not retrieve service details"
 
 echo ""
 echo "Deployment process completed. Thank you for using the Cold Email Generator!"
 
 # Check service status and print additional connectivity debugging info
 echo "Checking service details and connectivity..."
-kubectl get svc -n cold-email -o wide
+$KUBECTL_CMD get svc -n ${APP_NAME} -o wide
 echo ""
 
 # Check if any pods are running and get their status
 echo "Checking pod status:"
-kubectl get pods -n cold-email
-FIRST_POD=$(kubectl get pods -n cold-email -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+$KUBECTL_CMD get pods -n ${APP_NAME}
+FIRST_POD=$($KUBECTL_CMD get pods -n ${APP_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
 # Check pod logs to see if there are any application errors
 if [ ! -z "$FIRST_POD" ]; then
   echo ""
   echo "Pod logs for application container:"
-  kubectl logs $FIRST_POD -n cold-email -c app || echo "Couldn't get logs"
+  $KUBECTL_CMD logs $FIRST_POD -n ${APP_NAME} -c ${APP_NAME}-generator || echo "Couldn't get logs"
 fi
 
 # Check if the application is accessible on the NodePort
@@ -253,9 +208,9 @@ echo "sudo netstat -tulpn | grep -E '(30405|3000)'"
 echo ""
 echo "Wait a few minutes for the LoadBalancer to be fully provisioned and endpoints to be registered."
 echo "If application is still not accessible after 5-10 minutes, try these troubleshooting steps:"
-echo "1. Check pod status: kubectl get pods -n cold-email"
-echo "2. Check pod logs: kubectl logs -n cold-email [pod-name]"
-echo "3. Verify service endpoints: kubectl get endpoints -n cold-email"
-echo "4. Test connectivity directly to pod: kubectl port-forward -n cold-email [pod-name] 8080:3000"
+echo "1. Check pod status: kubectl get pods -n ${APP_NAME}"
+echo "2. Check pod logs: kubectl logs -n ${APP_NAME} [pod-name]"
+echo "3. Verify service endpoints: kubectl get endpoints -n ${APP_NAME}"
+echo "4. Test connectivity directly to pod: kubectl port-forward -n ${APP_NAME} [pod-name] 8080:3000"
 echo ""
 echo "Deployment process completed. Thank you for using the Cold Email Generator!" 
