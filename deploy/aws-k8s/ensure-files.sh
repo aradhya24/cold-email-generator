@@ -9,7 +9,7 @@ echo "===== Ensuring all required deployment files are in place ====="
 mkdir -p ~/deploy/aws-k8s
 
 # Check if required script files are present
-for script in k8s-deploy.sh verify-access.sh deployment-recovery.sh; do
+for script in k8s-deploy.sh verify-access.sh deployment-recovery.sh k8s-setup.sh; do
   if [ ! -f ~/deploy/aws-k8s/$script ]; then
     echo "❌ Missing script: $script - downloading from GitHub..."
     
@@ -30,6 +30,21 @@ done
 
 # Create k8s_manifests directory if it doesn't exist
 mkdir -p ~/k8s_manifests
+
+# Check if k3s is installed, if not run the setup script
+if ! command -v k3s &> /dev/null; then
+  echo "⚠️ k3s not found, running k8s-setup.sh to install it..."
+  ~/deploy/aws-k8s/k8s-setup.sh
+else
+  echo "✅ k3s is already installed"
+  # Check if kubectl works
+  if ! k3s kubectl get nodes &> /dev/null; then
+    echo "⚠️ k3s installed but not working properly, reinstalling..."
+    ~/deploy/aws-k8s/k8s-setup.sh
+  else
+    echo "✅ k3s is working properly"
+  fi
+fi
 
 echo "✅ All required deployment files are in place"
 echo "You can now run deployment scripts:"
