@@ -102,7 +102,7 @@ spec:
   ports:
   - port: 80
     targetPort: 3000
-    nodePort: 30405
+    nodePort: 30406
   selector:
     app: ${APP_NAME}-generator
 EOF
@@ -120,7 +120,7 @@ echo "Application deployment attempted!"
 echo ""
 echo "Application should be accessible at:"
 echo "- Load Balancer URL: http://${LB_DNS}"
-echo "- Node Port URL: http://${PUBLIC_IP}:30405"
+echo "- Node Port URL: http://${PUBLIC_IP}:30406"
 echo ""
 echo "Kubernetes resources:"
 echo "- Namespace: ${APP_NAME}"
@@ -131,7 +131,7 @@ echo ""
 
 # Create a simple health check that will work even if the application is not yet ready
 echo "Testing application access..."
-curl -s --connect-timeout 5 http://${PUBLIC_IP}:30405 || echo "Application not yet responding (this is normal if it's still starting up)"
+curl -s --connect-timeout 5 http://${PUBLIC_IP}:30406 || echo "Application not yet responding (this is normal if it's still starting up)"
 
 # Check and display deployments
 echo "Deployment status:"
@@ -185,26 +185,26 @@ fi
 
 # Check if the application is accessible on the NodePort
 echo ""
-echo "Testing NodePort connectivity on port 30405..."
-nc -zv -w 5 localhost 30405 || echo "NodePort not accessible locally"
+echo "Testing NodePort connectivity on port 30406..."
+nc -zv -w 5 localhost 30406 || echo "NodePort not accessible locally"
 
 # Check if the security group has the required ports open
 echo ""
 echo "Verifying security group rules for EC2 instance..."
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 SG_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
-aws ec2 describe-security-groups --group-ids $SG_ID --query "SecurityGroups[0].IpPermissions[?FromPort==\`30405\`]" --output json
+aws ec2 describe-security-groups --group-ids $SG_ID --query "SecurityGroups[0].IpPermissions[?FromPort==\`30406\`]" --output json
 
 echo ""
 echo "Important ports to check in security group:"
 echo "- Port 22: SSH access"
 echo "- Port 80: HTTP/Load Balancer access" 
-echo "- Port 30405: Kubernetes NodePort access"
+echo "- Port 30406: Kubernetes NodePort access"
 echo ""
 echo "If the application is still not accessible, try updating security group rules to allow these ports."
 echo ""
 echo "Complete troubleshooting command to run on EC2 instance:"
-echo "sudo netstat -tulpn | grep -E '(30405|3000)'"
+echo "sudo netstat -tulpn | grep -E '(30406|3000)'"
 echo ""
 echo "Wait a few minutes for the LoadBalancer to be fully provisioned and endpoints to be registered."
 echo "If application is still not accessible after 5-10 minutes, try these troubleshooting steps:"

@@ -35,7 +35,7 @@ sudo apt-get install -y ufw
 sudo ufw allow 22/tcp
 sudo ufw allow 6443/tcp  # Kubernetes API
 sudo ufw allow 30000:32767/tcp  # NodePort range
-sudo ufw allow 30405/tcp  # Specific NodePort for our application
+sudo ufw allow 30406/tcp  # Specific NodePort for our application
 sudo ufw --force enable
 
 # Create a simple test deployment to verify it's working
@@ -72,7 +72,7 @@ spec:
   ports:
   - port: 80
     targetPort: 80
-    nodePort: 30405
+    nodePort: 30406
   selector:
     app: nginx-test
 EOF
@@ -87,10 +87,10 @@ kubectl get service nginx-test
 
 # Get public IP
 PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-echo "Test application available at: http://$PUBLIC_IP:30405"
+echo "Test application available at: http://$PUBLIC_IP:30406"
 
 # Create a file to indicate completion
 touch $HOME/k8s-setup-complete
 
 echo "====== K3s setup completed successfully ======"
-echo "Your application will be accessible at: http://$PUBLIC_IP:30405"
+echo "Your application will be accessible at: http://$PUBLIC_IP:30406"
