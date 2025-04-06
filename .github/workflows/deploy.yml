@@ -478,7 +478,7 @@ jobs:
           
           # Run verification script remotely
           echo "Running verification script to fix any connectivity issues..."
-          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "~/verify-access.sh"
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "cd ~/deploy/aws-k8s && ./verify-access.sh"
           
           # Set iptables rules directly
           echo "Ensuring iptables rules for port 30405..."

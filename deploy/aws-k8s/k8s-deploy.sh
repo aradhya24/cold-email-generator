@@ -277,11 +277,27 @@ echo "Testing service access..."
 if [ ! -z "$MAIN_URL" ] && [ "$MAIN_URL" != "pending" ]; then
   echo "Testing access via LoadBalancer: $MAIN_URL"
   curl -s --connect-timeout 5 -I $MAIN_URL || echo "LoadBalancer not yet accessible, this is normal"
+  echo "Full HTML content check (LoadBalancer):"
+  curl -s --connect-timeout 5 $MAIN_URL | grep -i "cold email generator" || echo "LoadBalancer not fully accessible yet or content not loading"
 fi
 
 if [ ! -z "$FALLBACK_URL" ]; then
   echo "Testing access via NodePort: $FALLBACK_URL"
   curl -s --connect-timeout 5 -I $FALLBACK_URL || echo "NodePort not yet accessible, checking security groups"
+  echo "Full HTML content check (NodePort):"
+  curl -s --connect-timeout 5 $FALLBACK_URL | grep -i "cold email generator" || echo "NodePort not fully accessible yet or content not loading"
+  
+  # Ensure firewall allows the nodeport
+  echo "Ensuring iptables allows NodePort traffic..."
+  sudo iptables -I INPUT -p tcp --dport $NODE_PORT -j ACCEPT
+  sudo iptables -I OUTPUT -p tcp --sport $NODE_PORT -j ACCEPT
+  
+  # Test direct port access
+  echo "Testing direct port access on pod..."
+  POD_NAME=$($KUBECTL_CMD get pods -n $NAMESPACE -l app=${APP_NAME}-generator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if [ ! -z "$POD_NAME" ]; then
+    $KUBECTL_CMD exec $POD_NAME -n $NAMESPACE -- curl -s localhost:3000 | head -n 10 || echo "App may not be running correctly inside pod"
+  fi
 fi
 
 # Display access URLs
