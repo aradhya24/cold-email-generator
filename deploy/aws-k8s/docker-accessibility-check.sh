@@ -5,6 +5,7 @@ set -e
 
 export DOCKER_IMAGE=${DOCKER_IMAGE:-ghcr.io/aradhya24/cold-email:latest}
 export APP_NAME=${APP_NAME:-cold-email}
+export APP_PORT=8501
 
 echo "===== Docker Image Accessibility Check ====="
 
@@ -36,7 +37,7 @@ if sudo docker image inspect $DOCKER_IMAGE &>/dev/null; then
   
   # Try to run the image
   echo "Testing image by running a container..."
-  CONTAINER_ID=$(sudo docker run -d -p 8899:3000 $DOCKER_IMAGE)
+  CONTAINER_ID=$(sudo docker run -d -p 8899:$APP_PORT $DOCKER_IMAGE)
   
   if [ ! -z "$CONTAINER_ID" ]; then
     echo "✅ Container started successfully with ID: $CONTAINER_ID"
@@ -80,5 +81,5 @@ echo "===== Docker Image Check Complete ====="
 echo "If there were issues, ensure:"
 echo "1. The image exists and is correctly tagged"
 echo "2. You have authentication if needed (for private registries)"
-echo "3. The image contains a working application that listens on port 3000"
+echo "3. The image contains a working application that listens on port $APP_PORT"
 echo "==================================================" 

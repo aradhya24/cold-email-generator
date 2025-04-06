@@ -6,7 +6,7 @@ set -e
 APP_NAME=${APP_NAME:-cold-email}
 NAMESPACE=${NAMESPACE:-$APP_NAME}
 KUBECTL_CMD="k3s kubectl"
-APP_PORT=3000
+APP_PORT=8501
 
 echo "===== Verifying Cold Email Generator Application Access ====="
 
@@ -133,23 +133,8 @@ TARGET_PORT=$($KUBECTL_CMD get svc ${APP_NAME}-service -n $NAMESPACE -o jsonpath
 if [ "$TARGET_PORT" == "$APP_PORT" ]; then
   echo "✅ Service targetPort ($TARGET_PORT) correctly matches application port ($APP_PORT)"
 else
-  echo "❌ Service targetPort ($TARGET_PORT) does not match application port ($APP_PORT)!"
-  echo "This will cause connectivity issues. Updating service..."
-  cat <<EOF | $KUBECTL_CMD apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${APP_NAME}-service
-  namespace: ${NAMESPACE}
-spec:
-  type: LoadBalancer
-  ports:
-  - port: 80
-    targetPort: $APP_PORT
-  selector:
-    app: ${APP_NAME}-generator
-EOF
-  echo "Service updated to use targetPort: $APP_PORT"
+  echo "❌ Service targetPort ($TARGET_PORT) does not match application port ($APP_PORT)"
+  echo "This will cause connection issues - update the service definition"
 fi
 
 # Check NodePort as fallback

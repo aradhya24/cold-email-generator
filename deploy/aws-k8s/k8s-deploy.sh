@@ -58,7 +58,7 @@ spec:
         image: ${DOCKER_IMAGE}
         imagePullPolicy: Always
         ports:
-        - containerPort: 3000
+        - containerPort: 8501
           name: http
         resources:
           requests:
@@ -69,14 +69,14 @@ spec:
             cpu: "500m"
         env:
         - name: PORT
-          value: "3000"
+          value: "8501"
         - name: NODE_ENV
           value: "production"
         # Add health check with more relaxed settings
         readinessProbe:
           httpGet:
             path: /
-            port: 3000
+            port: 8501
           initialDelaySeconds: 20
           periodSeconds: 10
           timeoutSeconds: 5
@@ -84,7 +84,7 @@ spec:
         livenessProbe:
           httpGet:
             path: /
-            port: 3000
+            port: 8501
           initialDelaySeconds: 40
           periodSeconds: 20
           timeoutSeconds: 10
@@ -106,7 +106,7 @@ spec:
   type: LoadBalancer
   ports:
   - port: 80
-    targetPort: 3000
+    targetPort: 8501
     name: http
   selector:
     app: ${APP_NAME}-generator
@@ -173,8 +173,8 @@ metadata:
 spec:
   type: NodePort
   ports:
-  - port: 3000
-    targetPort: 3000
+  - port: 8501
+    targetPort: 8501
     nodePort: 30405
     name: http
   selector:
@@ -266,7 +266,7 @@ echo "Setting up port-forward for direct access (for debugging)..."
 POD_NAME=$($KUBECTL_CMD get pods -n $NAMESPACE -l app=${APP_NAME}-generator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [ ! -z "$POD_NAME" ]; then
   echo "Starting port-forward for pod $POD_NAME in background..."
-  $KUBECTL_CMD port-forward pod/$POD_NAME 8080:3000 -n $NAMESPACE > /dev/null 2>&1 &
+  $KUBECTL_CMD port-forward pod/$POD_NAME 8080:8501 -n $NAMESPACE > /dev/null 2>&1 &
   PF_PID=$!
   echo "Port-forward started with PID $PF_PID. App should be accessible at http://localhost:8080"
   echo "PF_PID=$PF_PID" >> ~/app_access.txt
@@ -296,7 +296,7 @@ if [ ! -z "$FALLBACK_URL" ]; then
   echo "Testing direct port access on pod..."
   POD_NAME=$($KUBECTL_CMD get pods -n $NAMESPACE -l app=${APP_NAME}-generator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
   if [ ! -z "$POD_NAME" ]; then
-    $KUBECTL_CMD exec $POD_NAME -n $NAMESPACE -- curl -s localhost:3000 | head -n 10 || echo "App may not be running correctly inside pod"
+    $KUBECTL_CMD exec $POD_NAME -n $NAMESPACE -- curl -s localhost:8501 | head -n 10 || echo "App may not be running correctly inside pod"
   fi
 fi
 
