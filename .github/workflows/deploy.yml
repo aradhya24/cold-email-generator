@@ -135,10 +135,20 @@ jobs:
           echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # Simple SSH config
-          echo "Host *" > ~/.ssh/config
-          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
-          echo "  UserKnownHostsFile=/dev/null" >> ~/.ssh/config
+          # More permissive SSH config for better connectivity
+          cat > ~/.ssh/config << EOF
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            ServerAliveInterval 30
+            ServerAliveCountMax 5
+            IdentityFile ~/.ssh/id_rsa
+          EOF
+          chmod 600 ~/.ssh/config
+          
+          # Check if the key looks right
+          echo "Verifying key format..."
+          head -n 1 ~/.ssh/id_rsa
       
       - name: Find EC2 Instance
         id: find_instance
@@ -301,10 +311,20 @@ jobs:
           echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # Simple SSH config
-          echo "Host *" > ~/.ssh/config
-          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
-          echo "  UserKnownHostsFile=/dev/null" >> ~/.ssh/config
+          # More permissive SSH config for better connectivity
+          cat > ~/.ssh/config << EOF
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            ServerAliveInterval 30
+            ServerAliveCountMax 5
+            IdentityFile ~/.ssh/id_rsa
+          EOF
+          chmod 600 ~/.ssh/config
+          
+          # Check if the key looks right
+          echo "Verifying key format..."
+          head -n 1 ~/.ssh/id_rsa
       
       - name: Setup Kubernetes
         run: |
@@ -317,11 +337,11 @@ jobs:
           echo "Setting up Kubernetes on EC2 instance: $EC2_IP"
           
           # Test SSH connection
-          ssh -o ConnectTimeout=30 $EC2_USER@$EC2_IP "echo SSH connection successful"
+          ssh -o ConnectTimeout=30 -i ~/.ssh/id_rsa -v $EC2_USER@$EC2_IP "echo SSH connection successful"
           
           # Copy and run Kubernetes setup script
-          scp deploy/aws-k8s/k8s-setup.sh $EC2_USER@$EC2_IP:~/
-          ssh $EC2_USER@$EC2_IP "chmod +x ~/k8s-setup.sh && ~/k8s-setup.sh"
+          scp -i ~/.ssh/id_rsa deploy/aws-k8s/k8s-setup.sh $EC2_USER@$EC2_IP:~/
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "chmod +x ~/k8s-setup.sh && ~/k8s-setup.sh"
           
           echo "Kubernetes setup completed."
 
@@ -344,6 +364,28 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Set up SSH key
+        run: |
+          echo "Setting up SSH key for EC2 access..."
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # More permissive SSH config to avoid issues
+          cat > ~/.ssh/config << EOF
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            ServerAliveInterval 30
+            ServerAliveCountMax 5
+            IdentityFile ~/.ssh/id_rsa
+          EOF
+          chmod 600 ~/.ssh/config
+          
+          # Test SSH connection
+          echo "Testing SSH connection to $EC2_IP..."
+          ssh -o ConnectTimeout=30 -v $EC2_USER@$EC2_IP "echo SSH connection test successful"
 
       - name: Deploy to Kubernetes
         run: |
@@ -368,26 +410,26 @@ jobs:
           fi
           
           echo "Connecting to $EC2_USER@$EC2_IP"
-          ssh -o StrictHostKeyChecking=accept-new $EC2_USER@$EC2_IP 'mkdir -p ~/k8s_manifests'
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP 'mkdir -p ~/k8s_manifests'
           if [ -d "k8s_manifests" ]; then
-            scp -r k8s_manifests/* $EC2_USER@$EC2_IP:~/k8s_manifests/
+            scp -i ~/.ssh/id_rsa -r k8s_manifests/* $EC2_USER@$EC2_IP:~/k8s_manifests/
           else
             echo "No manifests to copy"
           fi
           
           # Copy all deployment scripts
           echo "Copying deployment scripts..."
-          ssh $EC2_USER@$EC2_IP 'mkdir -p ~/deploy/aws-k8s'
-          scp deploy/aws-k8s/*.sh $EC2_USER@$EC2_IP:~/deploy/aws-k8s/
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP 'mkdir -p ~/deploy/aws-k8s'
+          scp -i ~/.ssh/id_rsa deploy/aws-k8s/*.sh $EC2_USER@$EC2_IP:~/deploy/aws-k8s/
           
           # Ensure files are in place and run deployment
           echo "Running deployment with recovery..."
-          ssh $EC2_USER@$EC2_IP "cd ~/deploy/aws-k8s && chmod +x *.sh && ./ensure-files.sh && GROQ_API_KEY=${{ secrets.GROQ_API_KEY }} ./k8s-deploy.sh"
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "cd ~/deploy/aws-k8s && chmod +x *.sh && ./ensure-files.sh && GROQ_API_KEY=${{ secrets.GROQ_API_KEY }} ./k8s-deploy.sh"
           
           # If the deploy failed, try recovery
           if [ $? -ne 0 ]; then
             echo "Initial deployment failed, attempting recovery..."
-            ssh $EC2_USER@$EC2_IP "cd ~/deploy/aws-k8s && ./deployment-recovery.sh"
+            ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "cd ~/deploy/aws-k8s && ./deployment-recovery.sh"
           fi
           
           echo "Application deployment completed."
@@ -436,16 +478,16 @@ jobs:
           
           # Run verification script remotely
           echo "Running verification script to fix any connectivity issues..."
-          ssh $EC2_USER@$EC2_IP "~/verify-access.sh"
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "~/verify-access.sh"
           
           # Set iptables rules directly
           echo "Ensuring iptables rules for port 30405..."
-          ssh $EC2_USER@$EC2_IP "sudo iptables -I INPUT -p tcp --dport 30405 -j ACCEPT && \
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "sudo iptables -I INPUT -p tcp --dport 30405 -j ACCEPT && \
                                      sudo iptables -I OUTPUT -p tcp --sport 30405 -j ACCEPT"
           
           # Verify port 30405 is accessible
           echo "Verifying application access..."
-          ssh $EC2_USER@$EC2_IP "curl -s -o /dev/null -w 'Application Status: %{http_code}\n' http://localhost:30405 || echo 'Application not yet accessible locally'"
+          ssh -i ~/.ssh/id_rsa $EC2_USER@$EC2_IP "curl -s -o /dev/null -w 'Application Status: %{http_code}\n' http://localhost:30405 || echo 'Application not yet accessible locally'"
           
           # Wait for network propagation
           echo "Waiting for network changes to propagate (30 seconds)..."
