@@ -44,6 +44,19 @@ if [ ! -z "$GROQ_API_KEY" ]; then
     --from-literal=GROQ_API_KEY=$GROQ_API_KEY \
     --namespace $NAMESPACE \
     --dry-run=client -o yaml | $KUBECTL_CMD apply -f -
+    
+  # Create Streamlit secrets file
+  echo "Creating Streamlit secrets file inside container..."
+  cat <<EOF | $KUBECTL_CMD apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: streamlit-secrets-config
+  namespace: ${NAMESPACE}
+data:
+  secrets.toml: |
+    GROQ_API_KEY = "${GROQ_API_KEY}"
+EOF
 fi
 
 # Deploy the application with updated port configuration
@@ -64,6 +77,10 @@ spec:
       labels:
         app: ${APP_NAME}-generator
     spec:
+      volumes:
+      - name: streamlit-secrets
+        configMap:
+          name: streamlit-secrets-config
       containers:
       - name: app
         image: ${DOCKER_IMAGE}
@@ -83,6 +100,15 @@ spec:
           value: "${APP_PORT}"
         - name: NODE_ENV
           value: "production"
+        - name: GROQ_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: groq-api-key
+              key: GROQ_API_KEY
+              optional: true
+        volumeMounts:
+        - name: streamlit-secrets
+          mountPath: /app/.streamlit
         # Add health check with more relaxed settings
         readinessProbe:
           httpGet:
