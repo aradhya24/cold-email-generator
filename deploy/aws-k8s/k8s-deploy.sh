@@ -72,14 +72,31 @@ spec:
         image: ${DOCKER_IMAGE}
         ports:
         - containerPort: 3000
+          name: http
         env:
         - name: PORT
           value: "3000"
+        - name: NODE_ENV
+          value: "production"
+        - name: HOST
+          value: "0.0.0.0"
         - name: GROQ_API_KEY
           valueFrom:
             secretKeyRef:
               name: app-secrets
               key: GROQ_API_KEY
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 20
         resources:
           limits:
             memory: "512Mi"
@@ -249,4 +266,21 @@ echo "2. Check pod logs: kubectl logs -n ${APP_NAME} [pod-name]"
 echo "3. Verify service endpoints: kubectl get endpoints -n ${APP_NAME}"
 echo "4. Test connectivity directly to pod: kubectl port-forward -n ${APP_NAME} [pod-name] 8080:3000"
 echo ""
-echo "Deployment process completed. Thank you for using the Cold Email Generator!" 
+echo "Deployment process completed. Thank you for using the Cold Email Generator!"
+
+# Show pod logs to debug application startup
+echo "Showing application logs to debug startup issues..."
+sleep 10  # Give the application a moment to start and generate logs
+FIRST_POD=$($KUBECTL_CMD get pods -n ${APP_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ ! -z "$FIRST_POD" ]; then
+  echo "Pod logs for the application container:"
+  $KUBECTL_CMD logs $FIRST_POD -n ${APP_NAME} || true
+  
+  # Try checking for listening ports inside the container
+  echo "Checking listening ports inside the container..."
+  $KUBECTL_CMD exec $FIRST_POD -n ${APP_NAME} -- sh -c "netstat -tulpn | grep LISTEN || ps aux" || echo "Could not check ports inside container"
+  
+  # Try to check what port the application is actually using
+  echo "Checking environment variables inside the container..."
+  $KUBECTL_CMD exec $FIRST_POD -n ${APP_NAME} -- sh -c "env | grep PORT" || echo "Could not check environment variables"
+fi 
