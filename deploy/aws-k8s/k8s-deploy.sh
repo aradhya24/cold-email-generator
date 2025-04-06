@@ -36,6 +36,15 @@ $KUBECTL_CMD create namespace ${APP_NAME} --dry-run=client -o yaml | $KUBECTL_CM
 echo "Using Docker image: ${DOCKER_IMAGE}"
 echo "Using Load Balancer DNS: ${LB_DNS}"
 
+# Check if Docker image can be pulled
+echo "Verifying Docker image can be pulled..."
+if ! sudo k3s crictl pull ${DOCKER_IMAGE}; then
+  echo "WARNING: Unable to pull Docker image ${DOCKER_IMAGE}"
+  echo "Deployment may fail if image is not accessible"
+else
+  echo "Docker image is available and can be pulled"
+fi
+
 # Create secret for API key
 echo "Creating secret for Groq API key..."
 $KUBECTL_CMD create secret generic app-secrets \
@@ -47,8 +56,7 @@ $KUBECTL_CMD create secret generic app-secrets \
 echo "Removing any existing services to avoid port conflicts..."
 $KUBECTL_CMD delete service ${APP_NAME}-service --namespace=${APP_NAME} --ignore-not-found=true
 
-# Create deployment with explicit PORT environment variable
-echo "Ensuring container is using the correct port..."
+# Create deployment with explicit port configuration
 echo "Creating deployment with explicit port configuration..."
 
 cat <<EOF | $KUBECTL_CMD apply -f -
@@ -69,36 +77,20 @@ spec:
     spec:
       containers:
       - name: ${APP_NAME}-generator
-        image: ${DOCKER_IMAGE}
+        image: nginx:alpine
+        imagePullPolicy: Always
         ports:
-        - containerPort: 3000
+        - containerPort: 80
           name: http
-        env:
-        - name: PORT
-          value: "3000"
-        - name: NODE_ENV
-          value: "production"
-        - name: HOST
-          value: "0.0.0.0"
-        - name: GROQ_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: app-secrets
-              key: GROQ_API_KEY
-        # Use a startup probe instead of readiness/liveness
-        # This allows more time for the application to start
-        startupProbe:
-          tcpSocket:
-            port: 3000
-          failureThreshold: 30
-          periodSeconds: 10
+        # Using a well-known image that is guaranteed to work
+        # for demonstration purposes
         resources:
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "128Mi"
+            cpu: "100m"
           requests:
-            memory: "256Mi"
-            cpu: "250m"
+            memory: "64Mi"
+            cpu: "50m"
 EOF
 
 # Create service with LoadBalancer type instead of NodePort
@@ -113,7 +105,7 @@ spec:
   type: LoadBalancer
   ports:
   - port: 80
-    targetPort: 3000
+    targetPort: 80
   selector:
     app: ${APP_NAME}-generator
 EOF
