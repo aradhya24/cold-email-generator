@@ -290,55 +290,71 @@ jobs:
 
   deploy_application:
     name: Deploy Application to Kubernetes
-    needs: [setup_kubernetes, deploy_infrastructure]
+    needs: [deploy_infrastructure, code_analysis, security_scan, build]
     runs-on: ubuntu-latest
-    env:
-      EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
-      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
+
+      - name: Download instance information
+        uses: actions/download-artifact@v1
+        with:
+          name: ec2-instance-info
+          path: ./
+
+      - name: Load instance information
+        run: |
+          if [ -f "ec2_info.txt" ]; then
+            source ec2_info.txt
+            echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+            echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
+          else
+            # Fallback to use the outputs directly from deploy_infrastructure job
+            echo "EC2_IP=${{ needs.deploy_infrastructure.outputs.EC2_IP }}" >> $GITHUB_ENV
+            echo "INSTANCE_ID=${{ needs.deploy_infrastructure.outputs.INSTANCE_ID }}" >> $GITHUB_ENV 
+            echo "LB_DNS=${{ needs.deploy_infrastructure.outputs.LB_DNS }}" >> $GITHUB_ENV
+          fi
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      
-      - name: Set up SSH
+
+      - name: Deploy to Kubernetes
         run: |
-          echo "Setting up SSH key for EC2 access..."
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          
-          # Simple SSH config
-          echo "Host *" > ~/.ssh/config
-          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
-          echo "  UserKnownHostsFile=/dev/null" >> ~/.ssh/config
-      
-      - name: Deploy Application
-        run: |
-          echo "Deploying application to Kubernetes..."
-          
-          # Copy Kubernetes configuration manifests if they exist
-          mkdir -p k8s_manifests
-          if [ -d "k8s" ]; then
-            cp -r k8s/* k8s_manifests/
+          ssh -o StrictHostKeyChecking=accept-new ${{ env.EC2_USER }}@${{ env.EC2_IP }} 'mkdir -p ~/k8s_manifests'
+          if [ -d "k8s_manifests" ]; then
+            scp -r k8s_manifests/* ${{ env.EC2_USER }}@${{ env.EC2_IP }}:~/k8s_manifests/
+          else
+            echo "No manifests to copy"
           fi
           
-          # Copy and run Kubernetes deployment script
-          scp -r k8s_manifests/ ${AWS_USER}@${EC2_IP}:~/k8s_manifests/ || echo "No manifests to copy"
-          scp deploy/aws-k8s/k8s-deploy.sh ${AWS_USER}@${EC2_IP}:~/
-          scp deploy/aws-k8s/verify-access.sh ${AWS_USER}@${EC2_IP}:~/
-          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-deploy.sh ~/verify-access.sh && \
-            export DOCKER_IMAGE=${DOCKER_IMAGE} && \
-            export LB_DNS=${LB_DNS} && \
-            export GROQ_API_KEY='${{ secrets.GROQ_API_KEY }}' && \
-            ~/k8s-deploy.sh"
+          # Copy all deployment scripts
+          echo "Copying deployment scripts..."
+          ssh ${{ env.EC2_USER }}@${{ env.EC2_IP }} 'mkdir -p ~/deploy/aws-k8s'
+          scp deploy/aws-k8s/*.sh ${{ env.EC2_USER }}@${{ env.EC2_IP }}:~/deploy/aws-k8s/
+          
+          # Ensure files are in place and run deployment
+          echo "Running deployment with recovery..."
+          ssh ${{ env.EC2_USER }}@${{ env.EC2_IP }} "cd ~/deploy/aws-k8s && chmod +x *.sh && ./ensure-files.sh && GROQ_API_KEY=${{ secrets.GROQ_API_KEY }} ./k8s-deploy.sh"
+          
+          # If the deploy failed, try recovery
+          if [ $? -ne 0 ]; then
+            echo "Initial deployment failed, attempting recovery..."
+            ssh ${{ env.EC2_USER }}@${{ env.EC2_IP }} "cd ~/deploy/aws-k8s && ./deployment-recovery.sh"
+          fi
           
           echo "Application deployment completed."
+        env:
+          DOCKER_IMAGE: ghcr.io/aradhya24/cold-email:${{ github.sha }}
+          APP_NAME: cold-email
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_USER: ubuntu
+          EC2_IP: ${{ env.EC2_IP }}
+          LB_DNS: ${{ env.LB_DNS }}
       
       - name: Ensure Port Accessibility
         run: |
