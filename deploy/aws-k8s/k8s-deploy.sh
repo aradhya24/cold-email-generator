@@ -1,70 +1,38 @@
 #!/bin/bash
-# Script to deploy application to Kubernetes
+# Script to deploy the Cold Email Generator to an AWS K3s cluster
+
 set -e
 
-echo "====== Deploying Cold Email Generator to Kubernetes ======"
-
-# Get environment variables
-DOCKER_IMAGE=${DOCKER_IMAGE:-ghcr.io/aradhya24/cold-email:latest}
-LB_DNS=${LB_DNS:-pending.elb.amazonaws.com}
-APP_NAME=${APP_NAME:-cold-email}
-
-# Check if LB_DNS is set
-if [ -z "$LB_DNS" ]; then
-  echo "WARNING: LB_DNS environment variable is not set"
-  echo "The application will be deployed but might not have the load balancer DNS information"
-fi
-
-# Check that kubectl is available
-echo "Verifying kubectl access..."
-# Use direct path for K3s kubectl
-if [ -f /usr/local/bin/kubectl ]; then
-  KUBECTL_CMD="/usr/local/bin/kubectl"
-elif [ -f ~/.kube/config ]; then
-  KUBECTL_CMD="kubectl"
-else
-  KUBECTL_CMD="/usr/local/bin/k3s kubectl"
-fi
-
-$KUBECTL_CMD get nodes
+export DOCKER_IMAGE=${DOCKER_IMAGE:-ghcr.io/aradhya24/cold-email:latest}
+export APP_NAME=${APP_NAME:-cold-email}
+export NAMESPACE=${NAMESPACE:-$APP_NAME}
+export KUBECTL_CMD="k3s kubectl"
 
 # Create namespace if it doesn't exist
-echo "Creating namespace..."
-$KUBECTL_CMD create namespace ${APP_NAME} --dry-run=client -o yaml | $KUBECTL_CMD apply -f -
+echo "Creating namespace $NAMESPACE if it doesn't exist..."
+$KUBECTL_CMD create namespace $NAMESPACE --dry-run=client -o yaml | $KUBECTL_CMD apply -f -
 
-# Print Docker image being used
-echo "Using Docker image: ${DOCKER_IMAGE}"
-echo "Using Load Balancer DNS: ${LB_DNS}"
-
-# Check if Docker image can be pulled
-echo "Verifying Docker image can be pulled..."
-if ! sudo k3s crictl pull ${DOCKER_IMAGE}; then
-  echo "WARNING: Unable to pull Docker image ${DOCKER_IMAGE}"
-  echo "Deployment may fail if image is not accessible"
-else
-  echo "Docker image is available and can be pulled"
+# Create secret for Groq API key if provided
+if [ ! -z "$GROQ_API_KEY" ]; then
+  echo "Creating Groq API key secret..."
+  $KUBECTL_CMD create secret generic groq-api-key \
+    --from-literal=GROQ_API_KEY=$GROQ_API_KEY \
+    --namespace $NAMESPACE \
+    --dry-run=client -o yaml | $KUBECTL_CMD apply -f -
 fi
 
-# Create secret for API key
-echo "Creating secret for Groq API key..."
-$KUBECTL_CMD create secret generic app-secrets \
-  --from-literal=GROQ_API_KEY="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" \
-  --namespace=${APP_NAME} \
-  --dry-run=client -o yaml | $KUBECTL_CMD apply -f -
+# Make sure existing services are deleted to avoid conflicts
+echo "Removing any existing services to avoid conflicts..."
+$KUBECTL_CMD delete service ${APP_NAME}-service -n $NAMESPACE --ignore-not-found
 
-# First, delete any existing service to avoid port conflicts
-echo "Removing any existing services to avoid port conflicts..."
-$KUBECTL_CMD delete service ${APP_NAME}-service --namespace=${APP_NAME} --ignore-not-found=true
-
-# Create deployment with explicit port configuration
-echo "Creating deployment with explicit port configuration..."
-
+# Deploy the application
+echo "Deploying Cold Email Generator to Kubernetes..."
 cat <<EOF | $KUBECTL_CMD apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${APP_NAME}-generator
-  namespace: ${APP_NAME}
+  namespace: ${NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -76,202 +44,157 @@ spec:
         app: ${APP_NAME}-generator
     spec:
       containers:
-      - name: ${APP_NAME}-generator
-        image: nginx:alpine
+      - name: app
+        image: ${DOCKER_IMAGE}
         imagePullPolicy: Always
         ports:
-        - containerPort: 80
-          name: http
-        # Using a well-known image that is guaranteed to work
-        # for demonstration purposes
+        - containerPort: 3000
         resources:
-          limits:
+          requests:
             memory: "128Mi"
             cpu: "100m"
-          requests:
-            memory: "64Mi"
-            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "300m"
+        env:
+        - name: PORT
+          value: "3000"
+        - name: NODE_ENV
+          value: "production"
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 20
 EOF
 
-# Create service with LoadBalancer type instead of NodePort
+# Create the service
 echo "Creating service with LoadBalancer type..."
 cat <<EOF | $KUBECTL_CMD apply -f -
 apiVersion: v1
 kind: Service
 metadata:
   name: ${APP_NAME}-service
-  namespace: ${APP_NAME}
+  namespace: ${NAMESPACE}
 spec:
   type: LoadBalancer
   ports:
   - port: 80
-    targetPort: 80
+    targetPort: 3000
   selector:
     app: ${APP_NAME}-generator
 EOF
 
-# Wait for deployment to be ready with longer timeout
-echo "Waiting for deployment to be ready (this may take a few minutes)..."
-$KUBECTL_CMD rollout status deployment/${APP_NAME}-generator --namespace=${APP_NAME} --timeout=300s || echo "Deployment not fully ready, but continuing..."
+# Wait for the deployment to roll out
+echo "Waiting for deployment to finish..."
+$KUBECTL_CMD rollout status deployment/${APP_NAME}-generator -n $NAMESPACE --timeout=300s
 
-# Continue with deployment even if rollout status times out
-echo "Checking pod status regardless of rollout status..."
-$KUBECTL_CMD get pods -n ${APP_NAME} -o wide
+# Wait for the LoadBalancer to be provisioned and save connection info
+echo "Waiting for LoadBalancer to be provisioned (this may take a few minutes)..."
+MAX_ATTEMPTS=30
+ATTEMPT=0
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+  ATTEMPT=$((ATTEMPT+1))
+  echo "Checking LoadBalancer status (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+  
+  LB_HOSTNAME=$($KUBECTL_CMD get svc ${APP_NAME}-service -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+  LB_IP=$($KUBECTL_CMD get svc ${APP_NAME}-service -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  
+  if [ ! -z "$LB_HOSTNAME" ]; then
+    echo "✅ LoadBalancer hostname provisioned: $LB_HOSTNAME"
+    MAIN_URL="http://$LB_HOSTNAME"
+    break
+  elif [ ! -z "$LB_IP" ]; then
+    echo "✅ LoadBalancer IP provisioned: $LB_IP"
+    MAIN_URL="http://$LB_IP"
+    break
+  else
+    echo "LoadBalancer still provisioning... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+    $KUBECTL_CMD describe svc ${APP_NAME}-service -n $NAMESPACE | grep -E "Type|LoadBalancer|Port"
+    
+    if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+      echo "Waiting 10 seconds before next check..."
+      sleep 10
+    fi
+  fi
+done
 
-# Get service details
-echo "Waiting for LoadBalancer to be provisioned..."
-sleep 30  # Give time for the LoadBalancer to be provisioned
+if [ -z "$MAIN_URL" ]; then
+  echo "⚠️ LoadBalancer not fully provisioned within the timeout period"
+  echo "This is normal for AWS and may take 3-5 minutes to complete"
+  echo "Current LoadBalancer status:"
+  $KUBECTL_CMD describe svc ${APP_NAME}-service -n $NAMESPACE
+fi
 
-# Get service details
-SERVICE_IP=$($KUBECTL_CMD get svc ${APP_NAME}-service -n ${APP_NAME} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-SERVICE_HOSTNAME=$($KUBECTL_CMD get svc ${APP_NAME}-service -n ${APP_NAME} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-
-# Fallback to NodePort if LoadBalancer isn't ready yet
+# Get NodePort as fallback access method
+NODE_PORT=$($KUBECTL_CMD get svc ${APP_NAME}-service -n $NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
 PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-NODE_PORT=$($KUBECTL_CMD get svc ${APP_NAME}-service -n ${APP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
+FALLBACK_URL="http://$PUBLIC_IP:$NODE_PORT"
+
+# Save access information for other scripts to use
+echo "Saving access information to ~/app_access.txt..."
+cat <<EOF > ~/app_access.txt
+MAIN_URL="${MAIN_URL:-pending}"
+FALLBACK_URL="${FALLBACK_URL}"
+LB_HOSTNAME="${LB_HOSTNAME}"
+LB_IP="${LB_IP}"
+NODE_PORT="${NODE_PORT}"
+PUBLIC_IP="${PUBLIC_IP}"
+EOF
+
+# Update security group for NodePort access if needed
+if [ ! -z "$NODE_PORT" ]; then
+  echo "Ensuring security group allows access to NodePort $NODE_PORT..."
+  INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+  SECURITY_GROUP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
+  
+  if [ ! -z "$SECURITY_GROUP" ]; then
+    # Add HTTP port 80 rule
+    echo "Ensuring HTTP port 80 is open..."
+    aws ec2 authorize-security-group-ingress \
+      --group-id $SECURITY_GROUP \
+      --protocol tcp \
+      --port 80 \
+      --cidr 0.0.0.0/0 2>/dev/null || echo "HTTP port rule already exists"
+      
+    # Add NodePort rule
+    echo "Ensuring NodePort $NODE_PORT is open..."
+    aws ec2 authorize-security-group-ingress \
+      --group-id $SECURITY_GROUP \
+      --protocol tcp \
+      --port $NODE_PORT \
+      --cidr 0.0.0.0/0 2>/dev/null || echo "NodePort rule already exists"
+  fi
+fi
 
 # Display access URLs
 echo ""
-echo "Application deployment attempted!"
+echo "==== Cold Email Generator Deployed Successfully ===="
+echo "🚀 Your application has been deployed!"
 echo ""
-echo "Application should be accessible at:"
-# Only show this if we have a hostname or IP from the LoadBalancer
-if [ ! -z "$SERVICE_HOSTNAME" ]; then
-  echo "- Load Balancer URL: http://${SERVICE_HOSTNAME}"
-elif [ ! -z "$SERVICE_IP" ]; then
-  echo "- Load Balancer IP: http://${SERVICE_IP}"
-fi
-
-if [ ! -z "$NODE_PORT" ]; then
-  echo "- Node Port URL (fallback): http://${PUBLIC_IP}:${NODE_PORT}"
-fi
-echo ""
-echo "Kubernetes resources:"
-echo "- Namespace: ${APP_NAME}"
-echo "- Deployment: ${APP_NAME}-generator"
-echo "- Service: ${APP_NAME}-service"
-echo "- Ingress: ${APP_NAME}-ingress"
-echo ""
-
-# Create a simple health check that will work even if the application is not yet ready
-echo "Testing application access..."
-if [ ! -z "$SERVICE_HOSTNAME" ]; then
-  curl -s --connect-timeout 5 http://${SERVICE_HOSTNAME} || echo "Application not yet responding (this is normal if it's still starting up)"
-elif [ ! -z "$SERVICE_IP" ]; then
-  curl -s --connect-timeout 5 http://${SERVICE_IP} || echo "Application not yet responding (this is normal if it's still starting up)"
-elif [ ! -z "$NODE_PORT" ]; then
-  curl -s --connect-timeout 5 http://${PUBLIC_IP}:${NODE_PORT} || echo "Application not yet responding (this is normal if it's still starting up)"
+echo "ℹ️ Access URLs:"
+if [ ! -z "$MAIN_URL" ] && [ "$MAIN_URL" != "pending" ]; then
+  echo "📌 Main URL (LoadBalancer): $MAIN_URL"
 else
-  echo "No accessible endpoints found yet. This is normal if the LoadBalancer is still being provisioned."
+  echo "📌 Main URL: LoadBalancer still provisioning (may take 3-5 minutes)"
+  echo "   Check status with: k3s kubectl describe svc ${APP_NAME}-service -n $NAMESPACE"
 fi
 
-# Check and display deployments
-echo "Deployment status:"
-$KUBECTL_CMD get deployments -n ${APP_NAME} || echo "Could not retrieve deployments"
-
-# Check pod status and retry if no pods found
-echo "Pod status:"
-PODS=$($KUBECTL_CMD get pods -n ${APP_NAME} 2>/dev/null)
-if [ -z "$PODS" ]; then
-  echo "No pods found. Waiting and trying again..."
-  sleep 30
-  $KUBECTL_CMD get pods -n ${APP_NAME} || echo "Still no pods found."
-else
-  echo "$PODS"
+if [ ! -z "$FALLBACK_URL" ]; then
+  echo "📌 Fallback URL (NodePort): $FALLBACK_URL"
 fi
 
-# Show pod details for troubleshooting
 echo ""
-echo "Pod details (for troubleshooting):"
-FIRST_POD=$($KUBECTL_CMD get pods -n ${APP_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-if [ ! -z "$FIRST_POD" ]; then
-  $KUBECTL_CMD describe pod $FIRST_POD -n ${APP_NAME} || echo "Could not get pod details"
-else
-  echo "No pods found to describe"
-fi
-
-# Show service details
+echo "⚠️ NOTE: AWS LoadBalancer typically takes 3-5 minutes to become fully accessible"
+echo "   If the Main URL doesn't work immediately, try again in a few minutes"
+echo "   or use the Fallback URL in the meantime."
 echo ""
-echo "Service details:"
-$KUBECTL_CMD describe service ${APP_NAME}-service -n ${APP_NAME} || echo "Could not retrieve service details"
-
-echo ""
-echo "Deployment process completed. Thank you for using the Cold Email Generator!"
-
-# Check service status and print additional connectivity debugging info
-echo "Checking service details and connectivity..."
-$KUBECTL_CMD get svc -n ${APP_NAME} -o wide
-echo ""
-
-# Check if any pods are running and get their status
-echo "Checking pod status:"
-$KUBECTL_CMD get pods -n ${APP_NAME}
-FIRST_POD=$($KUBECTL_CMD get pods -n ${APP_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
-# Check pod logs to see if there are any application errors
-if [ ! -z "$FIRST_POD" ]; then
-  echo ""
-  echo "Pod logs for application container:"
-  $KUBECTL_CMD logs $FIRST_POD -n ${APP_NAME} -c ${APP_NAME}-generator || echo "Couldn't get logs"
-fi
-
-# Check if the application is accessible on the NodePort
-echo ""
-echo "Testing connectivity..."
-if [ ! -z "$NODE_PORT" ]; then
-  echo "Testing NodePort connectivity on port ${NODE_PORT}..."
-  nc -zv -w 5 localhost ${NODE_PORT} || echo "NodePort not accessible locally"
-fi
-
-if [ ! -z "$SERVICE_HOSTNAME" ]; then
-  echo "Testing LoadBalancer connectivity..."
-  curl -s --connect-timeout 5 http://${SERVICE_HOSTNAME} -I || echo "LoadBalancer hostname not accessible yet"
-fi
-
-# Check if the security group has the required ports open
-echo ""
-echo "Verifying security group rules for EC2 instance..."
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-SG_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
-aws ec2 describe-security-groups --group-ids $SG_ID --query "SecurityGroups[0].IpPermissions[?FromPort==\`30407\`]" --output json
-
-echo ""
-echo "Important ports to check in security group:"
-echo "- Port 22: SSH access"
-echo "- Port 80: HTTP/Load Balancer access" 
-if [ ! -z "$NODE_PORT" ]; then
-  echo "- Port ${NODE_PORT}: Kubernetes NodePort access (fallback)"
-fi
-echo ""
-echo "If the application is still not accessible, try updating security group rules to allow these ports."
-echo ""
-if [ ! -z "$NODE_PORT" ]; then
-  echo "Complete troubleshooting command to run on EC2 instance:"
-  echo "sudo netstat -tulpn | grep -E '(${NODE_PORT}|3000)'"
-fi
-echo ""
-echo "Wait a few minutes for the LoadBalancer to be fully provisioned and endpoints to be registered."
-echo "If application is still not accessible after 5-10 minutes, try these troubleshooting steps:"
-echo "1. Check pod status: kubectl get pods -n ${APP_NAME}"
-echo "2. Check pod logs: kubectl logs -n ${APP_NAME} [pod-name]"
-echo "3. Verify service endpoints: kubectl get endpoints -n ${APP_NAME}"
-echo "4. Test connectivity directly to pod: kubectl port-forward -n ${APP_NAME} [pod-name] 8080:3000"
-echo ""
-echo "Deployment process completed. Thank you for using the Cold Email Generator!"
-
-# Show pod logs to debug application startup
-echo "Showing application logs to debug startup issues..."
-sleep 10  # Give the application a moment to start and generate logs
-FIRST_POD=$($KUBECTL_CMD get pods -n ${APP_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-if [ ! -z "$FIRST_POD" ]; then
-  echo "Pod logs for the application container:"
-  $KUBECTL_CMD logs $FIRST_POD -n ${APP_NAME} || true
-  
-  # Try checking for listening ports inside the container
-  echo "Checking listening ports inside the container..."
-  $KUBECTL_CMD exec $FIRST_POD -n ${APP_NAME} -- sh -c "netstat -tulpn | grep LISTEN || ps aux" || echo "Could not check ports inside container"
-  
-  # Try to check what port the application is actually using
-  echo "Checking environment variables inside the container..."
-  $KUBECTL_CMD exec $FIRST_POD -n ${APP_NAME} -- sh -c "env | grep PORT" || echo "Could not check environment variables"
-fi 
+echo "✅ To verify application access, run: ./verify-access.sh"
+echo "==================================================" 
