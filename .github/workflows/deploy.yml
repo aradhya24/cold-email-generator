@@ -183,17 +183,6 @@ jobs:
           # Also set output variables for downstream jobs
           echo "ec2_ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          
-          # Save to artifact
-          echo "EC2_IP=$INSTANCE_IP" > ec2_info.txt
-          echo "INSTANCE_ID=$INSTANCE_ID" >> ec2_info.txt
-          echo "LB_DNS=$INSTANCE_IP" >> ec2_info.txt
-
-      - name: Upload instance information
-        uses: actions/upload-artifact@v3
-        with:
-          name: ec2-instance-info
-          path: ec2_info.txt
       
       - name: Ensure security group has SSH access
         run: |
@@ -263,23 +252,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
-      - name: Download instance information
-        uses: actions/download-artifact@v3
-        with:
-          name: ec2-instance-info
-          path: ./
-
-      - name: Load instance information
-        run: |
-          if [ -f "ec2_info.txt" ]; then
-            source ec2_info.txt
-            echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-            echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
-          else
-            echo "Using outputs from deploy_infrastructure job"
-          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -317,28 +289,13 @@ jobs:
     name: Deploy Application to Kubernetes
     needs: [deploy_infrastructure, setup_kubernetes, code_analysis, security_scan, build]
     runs-on: ubuntu-latest
+    env:
+      EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
+      INSTANCE_ID: ${{ needs.deploy_infrastructure.outputs.instance_id }}
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
-      - name: Download instance information
-        uses: actions/download-artifact@v3
-        with:
-          name: ec2-instance-info
-          path: ./
-
-      - name: Load instance information
-        run: |
-          if [ -f "ec2_info.txt" ]; then
-            source ec2_info.txt
-            echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-            echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
-          else
-            echo "Using outputs from deploy_infrastructure job"
-            echo "EC2_IP=${{ needs.deploy_infrastructure.outputs.ec2_ip }}" >> $GITHUB_ENV
-            echo "LB_DNS=${{ needs.deploy_infrastructure.outputs.lb_dns }}" >> $GITHUB_ENV
-          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -434,28 +391,12 @@ jobs:
     name: Validate Deployment
     needs: [deploy_application, deploy_infrastructure]
     runs-on: ubuntu-latest
+    env:
+      EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
-      - name: Download instance information
-        uses: actions/download-artifact@v3
-        with:
-          name: ec2-instance-info
-          path: ./
-
-      - name: Load instance information
-        run: |
-          if [ -f "ec2_info.txt" ]; then
-            source ec2_info.txt
-            echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-            echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
-          else
-            echo "Using outputs from deploy_infrastructure job"
-            echo "EC2_IP=${{ needs.deploy_infrastructure.outputs.ec2_ip }}" >> $GITHUB_ENV
-            echo "LB_DNS=${{ needs.deploy_infrastructure.outputs.lb_dns }}" >> $GITHUB_ENV
-          fi
 
       - name: Basic Health Check
         run: |
@@ -474,25 +415,9 @@ jobs:
     name: Load Testing (Simple)
     needs: [validate_deployment, deploy_infrastructure]
     runs-on: ubuntu-latest
+    env:
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
-      - name: Download instance information
-        uses: actions/download-artifact@v3
-        with:
-          name: ec2-instance-info
-          path: ./
-
-      - name: Load instance information
-        run: |
-          if [ -f "ec2_info.txt" ]; then
-            source ec2_info.txt
-            echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-            echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
-          else
-            echo "Using outputs from deploy_infrastructure job"
-            echo "LB_DNS=${{ needs.deploy_infrastructure.outputs.lb_dns }}" >> $GITHUB_ENV
-          fi
-
       - name: Run Simple Load Test
         run: |
           echo "Performing simple load test on $LB_DNS..."
@@ -506,25 +431,9 @@ jobs:
     name: Deployment Summary
     needs: [validate_deployment, load_testing, deploy_infrastructure]
     runs-on: ubuntu-latest
+    env:
+      LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
     steps:
-      - name: Download instance information
-        uses: actions/download-artifact@v3
-        with:
-          name: ec2-instance-info
-          path: ./
-
-      - name: Load instance information
-        run: |
-          if [ -f "ec2_info.txt" ]; then
-            source ec2_info.txt
-            echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
-            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-            echo "LB_DNS=$LB_DNS" >> $GITHUB_ENV
-          else
-            echo "Using outputs from deploy_infrastructure job"
-            echo "LB_DNS=${{ needs.deploy_infrastructure.outputs.lb_dns }}" >> $GITHUB_ENV
-          fi
-
       - name: Deployment Summary
         run: |
           echo "====== Cold Email Generator Deployment Summary ======"
