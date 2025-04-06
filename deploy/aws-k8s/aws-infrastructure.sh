@@ -283,6 +283,14 @@ if [ -z "$SG_ID" ] || [ "$SG_ID" == "None" ]; then
     --port 22 \
     --cidr 0.0.0.0/0
   
+  # NodePort access for Kubernetes
+  echo "Adding NodePort access rule (port 30405)..."
+  aws ec2 authorize-security-group-ingress \
+    --group-id $EC2_SG \
+    --protocol tcp \
+    --port 30405 \
+    --cidr 0.0.0.0/0
+  
   # HTTP access for the web app
   echo "Adding HTTP access rule (port 80)..."
   aws ec2 authorize-security-group-ingress \
@@ -345,6 +353,7 @@ else
   
   # Ensure all necessary rules exist
   ensure_sg_rule 22 tcp 0.0.0.0/0 "SSH"
+  ensure_sg_rule 30405 tcp 0.0.0.0/0 "NodePort"
   ensure_sg_rule 80 tcp 0.0.0.0/0 "HTTP"
   ensure_sg_rule 443 tcp 0.0.0.0/0 "HTTPS"
   ensure_sg_rule 8501 tcp 0.0.0.0/0 "Streamlit"

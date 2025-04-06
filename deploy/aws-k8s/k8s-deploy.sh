@@ -24,6 +24,8 @@ fi
 # Make sure existing services are deleted to avoid conflicts
 echo "Removing any existing services to avoid conflicts..."
 $KUBECTL_CMD delete service ${APP_NAME}-service -n $NAMESPACE --ignore-not-found
+# Also clean up any test deployments if they exist
+$KUBECTL_CMD delete deployment test-nginx -n default --ignore-not-found
 
 # Deploy the application
 echo "Deploying Cold Email Generator to Kubernetes..."
@@ -76,25 +78,52 @@ spec:
 EOF
 
 # Create the service
-echo "Creating service with LoadBalancer type..."
+echo "Creating service with LoadBalancer type for Cold Email Generator..."
 cat <<EOF | $KUBECTL_CMD apply -f -
 apiVersion: v1
 kind: Service
 metadata:
   name: ${APP_NAME}-service
   namespace: ${NAMESPACE}
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
 spec:
   type: LoadBalancer
   ports:
   - port: 80
     targetPort: 3000
+    name: http
   selector:
     app: ${APP_NAME}-generator
 EOF
 
 # Wait for the deployment to roll out
-echo "Waiting for deployment to finish..."
+echo "Waiting for Cold Email Generator deployment to finish..."
 $KUBECTL_CMD rollout status deployment/${APP_NAME}-generator -n $NAMESPACE --timeout=300s
+
+# Verify the pods are running and ready
+echo "Verifying pod status..."
+POD_NAME=$($KUBECTL_CMD get pods -n $NAMESPACE -l app=${APP_NAME}-generator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ ! -z "$POD_NAME" ]; then
+  echo "✅ Pod created: $POD_NAME"
+  
+  # Check if pod is running
+  POD_STATUS=$($KUBECTL_CMD get pod $POD_NAME -n $NAMESPACE -o jsonpath='{.status.phase}')
+  if [ "$POD_STATUS" == "Running" ]; then
+    echo "✅ Pod is running"
+    
+    # Show pod logs for debugging
+    echo "Recent pod logs:"
+    $KUBECTL_CMD logs $POD_NAME -n $NAMESPACE --tail=20
+  else
+    echo "⚠️ Pod is not running yet (status: $POD_STATUS), waiting..."
+    $KUBECTL_CMD describe pod $POD_NAME -n $NAMESPACE
+  fi
+else
+  echo "❌ No pods found for Cold Email Generator!"
+  $KUBECTL_CMD get pods -n $NAMESPACE
+fi
 
 # Wait for the LoadBalancer to be provisioned and save connection info
 echo "Waiting for LoadBalancer to be provisioned (this may take a few minutes)..."
@@ -147,6 +176,8 @@ LB_HOSTNAME="${LB_HOSTNAME}"
 LB_IP="${LB_IP}"
 NODE_PORT="${NODE_PORT}"
 PUBLIC_IP="${PUBLIC_IP}"
+APP_NAME="${APP_NAME}"
+NAMESPACE="${NAMESPACE}"
 EOF
 
 # Update security group for NodePort access if needed
@@ -172,6 +203,18 @@ if [ ! -z "$NODE_PORT" ]; then
       --port $NODE_PORT \
       --cidr 0.0.0.0/0 2>/dev/null || echo "NodePort rule already exists"
   fi
+fi
+
+# Test the service access
+echo "Testing service access..."
+if [ ! -z "$MAIN_URL" ] && [ "$MAIN_URL" != "pending" ]; then
+  echo "Testing access via LoadBalancer: $MAIN_URL"
+  curl -s --connect-timeout 5 -I $MAIN_URL || echo "LoadBalancer not yet accessible, this is normal"
+fi
+
+if [ ! -z "$FALLBACK_URL" ]; then
+  echo "Testing access via NodePort: $FALLBACK_URL"
+  curl -s --connect-timeout 5 -I $FALLBACK_URL || echo "NodePort not yet accessible, checking security groups"
 fi
 
 # Display access URLs

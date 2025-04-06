@@ -26,33 +26,39 @@ if [ -z "$POD_NAME" ]; then
   echo "❌ No pods found! Checking for deployment issues..."
   $KUBECTL_CMD describe deployment ${APP_NAME}-generator -n $NAMESPACE || echo "No deployment found"
   
-  echo "Creating a test deployment to verify Kubernetes functionality..."
+  echo "Creating a test deployment of Cold Email Generator to verify Kubernetes functionality..."
+  DOCKER_IMAGE=${DOCKER_IMAGE:-ghcr.io/aradhya24/cold-email:latest}
   cat <<EOF | $KUBECTL_CMD apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: test-nginx
-  namespace: default
+  name: ${APP_NAME}-generator
+  namespace: ${NAMESPACE}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: test-nginx
+      app: ${APP_NAME}-generator
   template:
     metadata:
       labels:
-        app: test-nginx
+        app: ${APP_NAME}-generator
     spec:
       containers:
-      - name: nginx
-        image: nginx:alpine
+      - name: app
+        image: ${DOCKER_IMAGE}
         ports:
-        - containerPort: 80
+        - containerPort: ${APP_PORT}
 EOF
-  echo "Waiting for test deployment..."
-  sleep 20
-  $KUBECTL_CMD get pods -A
-  exit 1
+  echo "Waiting for Cold Email Generator deployment..."
+  sleep 30
+  $KUBECTL_CMD get pods -n $NAMESPACE
+  POD_NAME=$($KUBECTL_CMD get pods -n $NAMESPACE -l app=${APP_NAME}-generator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if [ -z "$POD_NAME" ]; then
+    echo "❌ Failed to create Cold Email Generator deployment"
+    $KUBECTL_CMD get pods -A
+    exit 1
+  fi
 else
   POD_STATUS=$($KUBECTL_CMD get pod $POD_NAME -n $NAMESPACE -o jsonpath='{.status.phase}')
   if [ "$POD_STATUS" == "Running" ]; then
@@ -71,7 +77,7 @@ else
       
       # Check if port is open in container
       echo "Checking if app is listening on port $APP_PORT inside container..."
-      $KUBECTL_CMD exec $POD_NAME -n $NAMESPACE -- sh -c "netstat -tulpn | grep $APP_PORT || echo 'Port not open'" 2>/dev/null || echo "Could not check ports (command not available)"
+      $KUBECTL_CMD exec $POD_NAME -n $NAMESPACE -- sh -c "netstat -tulpn 2>/dev/null | grep $APP_PORT || echo 'Port not open'" 2>/dev/null || echo "Could not check ports (command not available)"
     fi
   else
     echo "❌ Pod $POD_NAME is not running (status: $POD_STATUS)"
@@ -196,14 +202,14 @@ else
 fi
 
 # Try direct port-forwarding to verify app is accessible
-echo "Testing direct access to the application using port-forwarding..."
+echo "Testing direct access to the Cold Email Generator using port-forwarding..."
 # Run port-forward in background
 $KUBECTL_CMD port-forward $POD_NAME 8088:$APP_PORT -n $NAMESPACE &
 PF_PID=$!
 sleep 3
 
 # Try to access app via port-forward
-echo "Checking app via port-forward on http://localhost:8088..."
+echo "Checking Cold Email Generator app via port-forward on http://localhost:8088..."
 curl -s -I --connect-timeout 5 http://localhost:8088 || echo "App not accessible via port-forward"
 curl -s --connect-timeout 5 http://localhost:8088 | head -n 10 || echo "Could not get app content"
 
@@ -213,7 +219,7 @@ kill $PF_PID 2>/dev/null || true
 echo ""
 echo "==== IMPORTANT NOTES ===="
 echo "1. AWS LoadBalancer takes 3-5 minutes to become fully accessible after creation"
-echo "2. If the application is not accessible through the LoadBalancer URL, try again in a few minutes"
+echo "2. If the Cold Email Generator is not accessible through the LoadBalancer URL, try again in a few minutes"
 echo "3. You can use the NodePort URL as a fallback during LoadBalancer provisioning"
 echo ""
 
