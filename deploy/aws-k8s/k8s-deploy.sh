@@ -89,8 +89,8 @@ spec:
             cpu: "250m"
 EOF
 
-# Create NodePort service
-echo "Creating service with fixed NodePort..."
+# Create service with LoadBalancer type instead of NodePort
+echo "Creating service with LoadBalancer type..."
 cat <<EOF | $KUBECTL_CMD apply -f -
 apiVersion: v1
 kind: Service
@@ -98,11 +98,10 @@ metadata:
   name: ${APP_NAME}-service
   namespace: ${APP_NAME}
 spec:
-  type: NodePort
+  type: LoadBalancer
   ports:
   - port: 80
     targetPort: 3000
-    nodePort: 30406
   selector:
     app: ${APP_NAME}-generator
 EOF
@@ -111,16 +110,33 @@ EOF
 echo "Waiting for deployment to be ready..."
 $KUBECTL_CMD rollout status deployment/${APP_NAME}-generator --namespace=${APP_NAME} --timeout=120s
 
-# Get public IP of the node
+# Get service details
+echo "Waiting for LoadBalancer to be provisioned..."
+sleep 30  # Give time for the LoadBalancer to be provisioned
+
+# Get service details
+SERVICE_IP=$($KUBECTL_CMD get svc ${APP_NAME}-service -n ${APP_NAME} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+SERVICE_HOSTNAME=$($KUBECTL_CMD get svc ${APP_NAME}-service -n ${APP_NAME} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+
+# Fallback to NodePort if LoadBalancer isn't ready yet
 PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+NODE_PORT=$($KUBECTL_CMD get svc ${APP_NAME}-service -n ${APP_NAME} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
 
 # Display access URLs
 echo ""
 echo "Application deployment attempted!"
 echo ""
 echo "Application should be accessible at:"
-echo "- Load Balancer URL: http://${LB_DNS}"
-echo "- Node Port URL: http://${PUBLIC_IP}:30406"
+# Only show this if we have a hostname or IP from the LoadBalancer
+if [ ! -z "$SERVICE_HOSTNAME" ]; then
+  echo "- Load Balancer URL: http://${SERVICE_HOSTNAME}"
+elif [ ! -z "$SERVICE_IP" ]; then
+  echo "- Load Balancer IP: http://${SERVICE_IP}"
+fi
+
+if [ ! -z "$NODE_PORT" ]; then
+  echo "- Node Port URL (fallback): http://${PUBLIC_IP}:${NODE_PORT}"
+fi
 echo ""
 echo "Kubernetes resources:"
 echo "- Namespace: ${APP_NAME}"
@@ -131,7 +147,15 @@ echo ""
 
 # Create a simple health check that will work even if the application is not yet ready
 echo "Testing application access..."
-curl -s --connect-timeout 5 http://${PUBLIC_IP}:30406 || echo "Application not yet responding (this is normal if it's still starting up)"
+if [ ! -z "$SERVICE_HOSTNAME" ]; then
+  curl -s --connect-timeout 5 http://${SERVICE_HOSTNAME} || echo "Application not yet responding (this is normal if it's still starting up)"
+elif [ ! -z "$SERVICE_IP" ]; then
+  curl -s --connect-timeout 5 http://${SERVICE_IP} || echo "Application not yet responding (this is normal if it's still starting up)"
+elif [ ! -z "$NODE_PORT" ]; then
+  curl -s --connect-timeout 5 http://${PUBLIC_IP}:${NODE_PORT} || echo "Application not yet responding (this is normal if it's still starting up)"
+else
+  echo "No accessible endpoints found yet. This is normal if the LoadBalancer is still being provisioned."
+fi
 
 # Check and display deployments
 echo "Deployment status:"
@@ -185,26 +209,38 @@ fi
 
 # Check if the application is accessible on the NodePort
 echo ""
-echo "Testing NodePort connectivity on port 30406..."
-nc -zv -w 5 localhost 30406 || echo "NodePort not accessible locally"
+echo "Testing connectivity..."
+if [ ! -z "$NODE_PORT" ]; then
+  echo "Testing NodePort connectivity on port ${NODE_PORT}..."
+  nc -zv -w 5 localhost ${NODE_PORT} || echo "NodePort not accessible locally"
+fi
+
+if [ ! -z "$SERVICE_HOSTNAME" ]; then
+  echo "Testing LoadBalancer connectivity..."
+  curl -s --connect-timeout 5 http://${SERVICE_HOSTNAME} -I || echo "LoadBalancer hostname not accessible yet"
+fi
 
 # Check if the security group has the required ports open
 echo ""
 echo "Verifying security group rules for EC2 instance..."
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 SG_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
-aws ec2 describe-security-groups --group-ids $SG_ID --query "SecurityGroups[0].IpPermissions[?FromPort==\`30406\`]" --output json
+aws ec2 describe-security-groups --group-ids $SG_ID --query "SecurityGroups[0].IpPermissions[?FromPort==\`30407\`]" --output json
 
 echo ""
 echo "Important ports to check in security group:"
 echo "- Port 22: SSH access"
 echo "- Port 80: HTTP/Load Balancer access" 
-echo "- Port 30406: Kubernetes NodePort access"
+if [ ! -z "$NODE_PORT" ]; then
+  echo "- Port ${NODE_PORT}: Kubernetes NodePort access (fallback)"
+fi
 echo ""
 echo "If the application is still not accessible, try updating security group rules to allow these ports."
 echo ""
-echo "Complete troubleshooting command to run on EC2 instance:"
-echo "sudo netstat -tulpn | grep -E '(30406|3000)'"
+if [ ! -z "$NODE_PORT" ]; then
+  echo "Complete troubleshooting command to run on EC2 instance:"
+  echo "sudo netstat -tulpn | grep -E '(${NODE_PORT}|3000)'"
+fi
 echo ""
 echo "Wait a few minutes for the LoadBalancer to be fully provisioned and endpoints to be registered."
 echo "If application is still not accessible after 5-10 minutes, try these troubleshooting steps:"
