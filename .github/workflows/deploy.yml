@@ -145,6 +145,20 @@ jobs:
         run: |
           echo "Finding EC2 instance from Auto Scaling Group..."
           
+          # Show Auto Scaling Group details for debugging
+          echo "Debug: Looking for instances in ${APP_NAME}-asg"
+          aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${APP_NAME}-asg \
+            --query "AutoScalingGroups[].Instances[].[InstanceId, LifecycleState]" \
+            --output table
+            
+          # List all running EC2 instances for debugging
+          echo "Debug: List of all running EC2 instances:"
+          aws ec2 describe-instances \
+            --filters "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].[InstanceId, PublicIpAddress, Tags[?Key=='aws:autoscaling:groupName'].Value | [0]]" \
+            --output table
+          
           # Retry multiple times to find a running instance
           MAX_RETRIES=20
           RETRY_COUNT=0
@@ -203,6 +217,22 @@ jobs:
       
       - name: Wait for SSH availability
         run: |
+          # Make sure we have the IP address
+          echo "Debug: INSTANCE_IP=$INSTANCE_IP"
+          echo "Debug: EC2_IP=${EC2_IP}"
+          
+          # Fallback in case INSTANCE_IP is not set
+          if [ -z "$INSTANCE_IP" ]; then
+            echo "INSTANCE_IP is not set, using EC2_IP variable"
+            INSTANCE_IP=$EC2_IP
+          fi
+          
+          # Final validation
+          if [ -z "$INSTANCE_IP" ]; then
+            echo "ERROR: No IP address found for SSH connection!"
+            exit 1
+          fi
+          
           echo "Waiting for SSH to be available on $INSTANCE_IP..."
           
           # Wait for SSH to be available with retries
@@ -212,7 +242,10 @@ jobs:
           until [ $RETRY_COUNT -ge $MAX_RETRIES ]
           do
             echo "Attempt $RETRY_COUNT of $MAX_RETRIES..."
-            nc -zv $INSTANCE_IP 22 -w 5 && break
+            if nc -zv $INSTANCE_IP 22 -w 5; then
+              echo "SSH connection successful!"
+              break
+            fi
             RETRY_COUNT=$((RETRY_COUNT+1))
             sleep 10
           done
@@ -249,6 +282,7 @@ jobs:
       EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
       INSTANCE_ID: ${{ needs.deploy_infrastructure.outputs.instance_id }}
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
+      EC2_USER: ubuntu
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -274,14 +308,20 @@ jobs:
       
       - name: Setup Kubernetes
         run: |
+          # Ensure EC2_USER is set
+          if [ -z "$EC2_USER" ]; then
+            echo "EC2_USER is not set, using AWS_USER=$AWS_USER"
+            EC2_USER=$AWS_USER
+          fi
+          
           echo "Setting up Kubernetes on EC2 instance: $EC2_IP"
           
           # Test SSH connection
-          ssh -o ConnectTimeout=30 ${AWS_USER}@${EC2_IP} "echo SSH connection successful"
+          ssh -o ConnectTimeout=30 $EC2_USER@$EC2_IP "echo SSH connection successful"
           
           # Copy and run Kubernetes setup script
-          scp deploy/aws-k8s/k8s-setup.sh ${AWS_USER}@${EC2_IP}:~/
-          ssh ${AWS_USER}@${EC2_IP} "chmod +x ~/k8s-setup.sh && ~/k8s-setup.sh"
+          scp deploy/aws-k8s/k8s-setup.sh $EC2_USER@$EC2_IP:~/
+          ssh $EC2_USER@$EC2_IP "chmod +x ~/k8s-setup.sh && ~/k8s-setup.sh"
           
           echo "Kubernetes setup completed."
 
@@ -293,6 +333,7 @@ jobs:
       EC2_IP: ${{ needs.deploy_infrastructure.outputs.ec2_ip }}
       INSTANCE_ID: ${{ needs.deploy_infrastructure.outputs.instance_id }}
       LB_DNS: ${{ needs.deploy_infrastructure.outputs.lb_dns }}
+      EC2_USER: ubuntu
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -306,26 +347,47 @@ jobs:
 
       - name: Deploy to Kubernetes
         run: |
-          ssh -o StrictHostKeyChecking=accept-new ${{ env.EC2_USER }}@${{ env.EC2_IP }} 'mkdir -p ~/k8s_manifests'
+          # Make sure environment variables are set
+          echo "Debug: EC2_USER=$EC2_USER, AWS_USER=$AWS_USER"
+          
+          # Use AWS_USER if EC2_USER is not defined
+          if [ -z "$EC2_USER" ]; then
+            echo "EC2_USER is not set, using AWS_USER=$AWS_USER"
+            EC2_USER=$AWS_USER
+          fi
+          
+          # Final validation
+          if [ -z "$EC2_USER" ]; then
+            echo "ERROR: No user defined for SSH connection!"
+            exit 1
+          fi
+          
+          if [ -z "$EC2_IP" ]; then
+            echo "ERROR: No IP address defined for SSH connection!"
+            exit 1
+          fi
+          
+          echo "Connecting to $EC2_USER@$EC2_IP"
+          ssh -o StrictHostKeyChecking=accept-new $EC2_USER@$EC2_IP 'mkdir -p ~/k8s_manifests'
           if [ -d "k8s_manifests" ]; then
-            scp -r k8s_manifests/* ${{ env.EC2_USER }}@${{ env.EC2_IP }}:~/k8s_manifests/
+            scp -r k8s_manifests/* $EC2_USER@$EC2_IP:~/k8s_manifests/
           else
             echo "No manifests to copy"
           fi
           
           # Copy all deployment scripts
           echo "Copying deployment scripts..."
-          ssh ${{ env.EC2_USER }}@${{ env.EC2_IP }} 'mkdir -p ~/deploy/aws-k8s'
-          scp deploy/aws-k8s/*.sh ${{ env.EC2_USER }}@${{ env.EC2_IP }}:~/deploy/aws-k8s/
+          ssh $EC2_USER@$EC2_IP 'mkdir -p ~/deploy/aws-k8s'
+          scp deploy/aws-k8s/*.sh $EC2_USER@$EC2_IP:~/deploy/aws-k8s/
           
           # Ensure files are in place and run deployment
           echo "Running deployment with recovery..."
-          ssh ${{ env.EC2_USER }}@${{ env.EC2_IP }} "cd ~/deploy/aws-k8s && chmod +x *.sh && ./ensure-files.sh && GROQ_API_KEY=${{ secrets.GROQ_API_KEY }} ./k8s-deploy.sh"
+          ssh $EC2_USER@$EC2_IP "cd ~/deploy/aws-k8s && chmod +x *.sh && ./ensure-files.sh && GROQ_API_KEY=${{ secrets.GROQ_API_KEY }} ./k8s-deploy.sh"
           
           # If the deploy failed, try recovery
           if [ $? -ne 0 ]; then
             echo "Initial deployment failed, attempting recovery..."
-            ssh ${{ env.EC2_USER }}@${{ env.EC2_IP }} "cd ~/deploy/aws-k8s && ./deployment-recovery.sh"
+            ssh $EC2_USER@$EC2_IP "cd ~/deploy/aws-k8s && ./deployment-recovery.sh"
           fi
           
           echo "Application deployment completed."
@@ -339,6 +401,12 @@ jobs:
       
       - name: Ensure Port Accessibility
         run: |
+          # Make sure EC2_USER is set
+          if [ -z "$EC2_USER" ]; then
+            echo "EC2_USER is not set, using AWS_USER=$AWS_USER"
+            EC2_USER=$AWS_USER
+          fi
+          
           echo "Ensuring application is accessible via NodePort 30405..."
           
           # Configure security group to allow port 30405
@@ -368,16 +436,16 @@ jobs:
           
           # Run verification script remotely
           echo "Running verification script to fix any connectivity issues..."
-          ssh ${AWS_USER}@${EC2_IP} "~/verify-access.sh"
+          ssh $EC2_USER@$EC2_IP "~/verify-access.sh"
           
           # Set iptables rules directly
           echo "Ensuring iptables rules for port 30405..."
-          ssh ${AWS_USER}@${EC2_IP} "sudo iptables -I INPUT -p tcp --dport 30405 -j ACCEPT && \
+          ssh $EC2_USER@$EC2_IP "sudo iptables -I INPUT -p tcp --dport 30405 -j ACCEPT && \
                                      sudo iptables -I OUTPUT -p tcp --sport 30405 -j ACCEPT"
           
           # Verify port 30405 is accessible
           echo "Verifying application access..."
-          ssh ${AWS_USER}@${EC2_IP} "curl -s -o /dev/null -w 'Application Status: %{http_code}\n' http://localhost:30405 || echo 'Application not yet accessible locally'"
+          ssh $EC2_USER@$EC2_IP "curl -s -o /dev/null -w 'Application Status: %{http_code}\n' http://localhost:30405 || echo 'Application not yet accessible locally'"
           
           # Wait for network propagation
           echo "Waiting for network changes to propagate (30 seconds)..."
