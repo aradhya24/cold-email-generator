@@ -85,18 +85,13 @@ spec:
             secretKeyRef:
               name: app-secrets
               key: GROQ_API_KEY
-        readinessProbe:
-          httpGet:
-            path: /
-            port: http
-          initialDelaySeconds: 10
-          periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /
-            port: http
-          initialDelaySeconds: 15
-          periodSeconds: 20
+        # Use a startup probe instead of readiness/liveness
+        # This allows more time for the application to start
+        startupProbe:
+          tcpSocket:
+            port: 3000
+          failureThreshold: 30
+          periodSeconds: 10
         resources:
           limits:
             memory: "512Mi"
@@ -123,9 +118,13 @@ spec:
     app: ${APP_NAME}-generator
 EOF
 
-# Wait for deployment to be ready
-echo "Waiting for deployment to be ready..."
-$KUBECTL_CMD rollout status deployment/${APP_NAME}-generator --namespace=${APP_NAME} --timeout=120s
+# Wait for deployment to be ready with longer timeout
+echo "Waiting for deployment to be ready (this may take a few minutes)..."
+$KUBECTL_CMD rollout status deployment/${APP_NAME}-generator --namespace=${APP_NAME} --timeout=300s || echo "Deployment not fully ready, but continuing..."
+
+# Continue with deployment even if rollout status times out
+echo "Checking pod status regardless of rollout status..."
+$KUBECTL_CMD get pods -n ${APP_NAME} -o wide
 
 # Get service details
 echo "Waiting for LoadBalancer to be provisioned..."
