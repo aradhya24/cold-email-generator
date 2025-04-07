@@ -81,6 +81,8 @@ spec:
       - name: streamlit-secrets
         configMap:
           name: streamlit-secrets-config
+      - name: root-streamlit
+        emptyDir: {}
       containers:
       - name: app
         image: ${DOCKER_IMAGE}
@@ -109,6 +111,15 @@ spec:
         volumeMounts:
         - name: streamlit-secrets
           mountPath: /app/.streamlit
+        - name: root-streamlit
+          mountPath: /root/.streamlit
+        command:
+        - sh
+        - -c
+        - |
+          mkdir -p /root/.streamlit
+          cp /app/.streamlit/secrets.toml /root/.streamlit/
+          streamlit run app/main.py --server.port=${APP_PORT} --server.address=0.0.0.0
         # Add health check with more relaxed settings
         readinessProbe:
           httpGet:
