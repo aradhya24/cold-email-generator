@@ -117,8 +117,19 @@ spec:
         - sh
         - -c
         - |
-          mkdir -p /root/.streamlit
+          # Create directories and set permissions
+          mkdir -p /root/.streamlit /app/.streamlit
+          chmod 755 /root/.streamlit /app/.streamlit
+          
+          # Copy secrets file to both locations
           cp /app/.streamlit/secrets.toml /root/.streamlit/
+          chmod 644 /root/.streamlit/secrets.toml /app/.streamlit/secrets.toml
+          
+          # Verify files exist and have correct permissions
+          ls -la /root/.streamlit/
+          ls -la /app/.streamlit/
+          
+          # Start the application
           streamlit run app/main.py --server.port=${APP_PORT} --server.address=0.0.0.0
         # Add health check with more relaxed settings
         readinessProbe:
